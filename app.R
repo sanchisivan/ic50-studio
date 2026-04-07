@@ -499,9 +499,11 @@ encode_parameters <- function(bottom, top, ic50_param, hill, asymmetry, model) {
 }
 
 compute_half_max_ic50 <- function(params, model, direction, observed_dose) {
-  target_response <- params$bottom + 0.5 * (params$top - params$bottom)
-  lower <- log10(max(min(observed_dose, na.rm = TRUE) / 1000, .Machine$double.eps))
-  upper <- log10(max(observed_dose, na.rm = TRUE) * 1000)
+  target_response <- 50
+  search_dose <- c(observed_dose, params$ic50_param)
+  search_dose <- search_dose[is.finite(search_dose) & search_dose > 0]
+  lower <- log10(max(min(search_dose, na.rm = TRUE) / 1000, .Machine$double.eps))
+  upper <- log10(max(search_dose, na.rm = TRUE) * 1000)
 
   response_gap <- function(log_dose) {
     predict_curve(10^log_dose, params, model, direction) - target_response
@@ -1099,6 +1101,12 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
         uncertainty_values = empty_uncertainty()
       )
     }
+
+    if (fits[[group_name]]$result_row$fit_status[1] == "OK" &&
+        identical(fits[[group_name]]$result_row$fit_reliability[1], "Observed range does not cross 50%")) {
+      fits[[group_name]]$result_row$ic50[1] <- NA_real_
+      fits[[group_name]]$result_row$ic50_reported[1] <- fits[[group_name]]$result_row$ic50_interpretation[1]
+    }
   }
 
   results_df <- do.call(rbind, lapply(fits, `[[`, "result_row"))
@@ -1638,7 +1646,11 @@ build_plot <- function(prepared, fit_data, input) {
   }
 
   if (isTRUE(input$show_ic50_guides)) {
-    ic50_df <- fit_data$results[is.finite(fit_data$results$ic50), c("group", "ic50")]
+    ic50_df <- fit_data$results[
+      is.finite(fit_data$results$ic50) &
+        fit_data$results$reporting_status == "Report numeric IC50",
+      c("group", "ic50")
+    ]
     if (nrow(ic50_df) > 0) {
       p <- p + geom_vline(
         data = ic50_df,
