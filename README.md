@@ -1,6 +1,6 @@
 # IC50 Studio
 
-IC50 Studio is an R Shiny app for loading dose-response data, fitting common sigmoid models, calculating IC50 values, comparing equations, and exporting publication-ready plots.
+IC50 Studio is an R Shiny app for loading dose-response data, fitting common sigmoid models, calculating IC50 or EC50 values, comparing equations, and exporting publication-ready plots.
 
 It is designed for people who normally work in spreadsheet-based curve-fitting tools but want an open, editable workflow in R.
 
@@ -10,11 +10,12 @@ Developed at the **Laboratory of Bioactive Peptides (LPB)**, Faculty of Biochemi
 
 - Import `csv`, `tsv`, `txt`, `xls`, and `xlsx`
 - Map your own concentration/dose, response, and grouping columns
+- Normalize responses either from the observed range or from manual 100% and 0% assay controls
 - Fit `4PL`, `5PL`, `3PL (Hill fixed = 1)`, `3PL (Bottom = 0)`, and `3PL (Top = 100)`
 - Use `Auto-detect`, `Increasing`, or `Decreasing` curve direction
 - Fit either `Group means` or `All observations`
 - Compare all models without bootstrap and get a suggested equation
-- Report IC50 with `None`, `95% CI`, `+/- SD`, or `+/- SEM`
+- Report IC50 or EC50 with `None`, `95% CI`, `+/- SD`, or `+/- SEM`
 - Export plots and results tables
 - Flag non-reportable IC50 values such as curves that never reach 50%
 - Show short fit-quality reasons such as `Top far above data` or `50% not reached`
@@ -50,6 +51,7 @@ Notes:
 - The app does not assume a fixed concentration unit.
 - You can use `nM`, `uM`, `ug/mL`, `mg/mL`, or any other unit as long as the concentration column is numeric.
 - Write the exact unit you want in the x-axis title.
+- If you want absolute-style normalization, you can enter manual `100%` and `0%` control responses. The app uses `100 * (Y - control_0) / (control_100 - control_0)`.
 
 An example file is included at [example_dose_response.csv](example_dose_response.csv).
 
@@ -58,7 +60,7 @@ An example file is included at [example_dose_response.csv](example_dose_response
 1. Upload your file.
 2. Map the concentration, response, and optional group columns.
 3. Leave `Curve direction` on `Auto-detect` unless you need to force it.
-4. Start with `IC50 uncertainty = None` for speed.
+4. Start with `Potency uncertainty = None` for speed.
 5. If you are unsure which model to use, enable `Compare all models first (no bootstrap)`.
 6. Click `Run analysis`.
 7. Review the suggested model and the fit table.
@@ -79,18 +81,19 @@ If you are unsure, use the model comparison option first.
 
 The app reports a `reporting_status` column to make it clearer what should and should not be reported:
 
-- `Report numeric IC50`: the fit looks acceptable for numeric reporting
-- `Do not report numeric IC50 (50% not reached)`: the observed data never reach 50%, so report this as above or below the tested range instead of giving a numeric IC50
-- `Do not report numeric IC50 (extrapolated)`: the fitted IC50 falls outside the tested concentration range
-- `Numeric IC50 shown; review fit`: the fit exists, but the curve shape or plateau behavior needs caution
+- `Report numeric potency value`: the fit looks acceptable for numeric reporting
+- `Do not report numeric value (target not reached)`: the observed data never reach the target response for the selected metric, so report this as above or below the tested range instead of giving a numeric value
+- `Do not report numeric value (extrapolated)`: the fitted value falls outside the tested concentration range
+- `Numeric value shown; review fit`: the fit exists, but the curve shape or plateau behavior needs caution
 - `No fit available`: the curve could not be fit
 
 The table also includes a `fit_reason` column with a short explanation:
 
 - `Top far above data`: the fitted upper plateau is much higher than the observed points, so the model is extrapolating strongly
 - `Bottom far below data`: the fitted lower plateau drops well below the observed low-response points
-- `50% not reached`: the observed responses never cross the 50% level, so the app does not report a numeric IC50
-- `IC50 outside tested range`: the fitted crossing of 50% lies outside the tested concentration range
+- `50% not reached`: used in IC50 mode when the observed responses never cross the 50% level
+- `Half-max effect not reached`: used in EC50 mode when the observed responses do not span the fitted half-max effect level
+- `Value outside tested range`: the fitted potency value lies outside the tested concentration range
 - `Flat or invalid fitted range`: the fitted curve collapsed to an implausible response span
 
 In many practical cases, a visually smooth `4PL` can still be flagged if the fitted top or bottom is unrealistic. When this happens, try a simpler model such as `3PL (Hill fixed = 1)` or expand the concentration range.
@@ -107,12 +110,12 @@ After each run, the app can show a short summary window if any groups need atten
 
 Use the popup as a quick warning, then check the full `Fit Results` table for the final interpretation.
 
-## IC50 uncertainty
+## Potency uncertainty
 
-IC50 uncertainty is optional and uses bootstrap resampling.
+Potency uncertainty is optional and uses bootstrap resampling.
 
 - `95% CI` is usually the best choice for publication
-- `+/- SD` and `+/- SEM` are derived from the bootstrap distribution of IC50
+- `+/- SD` and `+/- SEM` are derived from the bootstrap distribution of the fitted potency value
 - Keep uncertainty set to `None` during exploration for speed
 - Around `50` bootstrap iterations is useful for a quick preview
 - Around `100 to 200` bootstrap iterations is a better starting point for final reporting

@@ -32,6 +32,7 @@ all_model_choices <- c(
   "3PL (Bottom = 0)",
   "3PL (Top = 100)"
 )
+manual_control_normalization <- "Normalize using manual 0% and 100% controls"
 
 sample_dataset <- function() {
   data.frame(
@@ -97,9 +98,16 @@ guess_column <- function(data, patterns, fallback = NULL) {
   fallback %||% nm[1]
 }
 
-normalize_vector <- function(x, mode) {
+normalize_vector <- function(x, mode, control_100 = NA_real_, control_0 = NA_real_) {
   if (mode == "Raw values") {
     return(x)
+  }
+
+  if (identical(mode, manual_control_normalization)) {
+    if (!is.finite(control_100) || !is.finite(control_0) || isTRUE(all.equal(control_100, control_0))) {
+      stop("Manual normalization requires numeric 100% and 0% control values that are different.")
+    }
+    return((x - control_0) / (control_100 - control_0) * 100)
   }
 
   x_min <- min(x, na.rm = TRUE)
@@ -241,6 +249,45 @@ format_decimal_text <- function(x, decimals = 2) {
   formatC(x, format = "f", digits = decimals)
 }
 
+potency_metric_label <- function(potency_metric = "IC50") {
+  if (!nzchar(trimws(potency_metric %||% ""))) {
+    return("IC50")
+  }
+  trimws(potency_metric)
+}
+
+potency_metric_lower <- function(potency_metric = "IC50") {
+  tolower(potency_metric_label(potency_metric))
+}
+
+potency_target_response <- function(params, potency_metric = "IC50") {
+  if (identical(potency_metric_label(potency_metric), "EC50")) {
+    return(params$bottom + 0.5 * (params$top - params$bottom))
+  }
+  50
+}
+
+potency_target_reason <- function(potency_metric = "IC50") {
+  if (identical(potency_metric_label(potency_metric), "EC50")) {
+    return("Half-max effect not reached")
+  }
+  "50% not reached"
+}
+
+potency_target_phrase <- function(potency_metric = "IC50") {
+  if (identical(potency_metric_label(potency_metric), "EC50")) {
+    return("half-max effect")
+  }
+  "50%"
+}
+
+rename_potency_column_names <- function(column_names, potency_metric = "IC50") {
+  lower_label <- potency_metric_lower(potency_metric)
+  renamed <- gsub("^ic50", lower_label, column_names)
+  renamed[column_names == "midpoint_parameter"] <- paste0(lower_label, "_parameter")
+  renamed
+}
+
 join_messages <- function(...) {
   parts <- c(...)
   parts <- parts[nzchar(parts) & !is.na(parts)]
@@ -293,7 +340,7 @@ format_problem_groups <- function(diagnostics_df, max_groups = 4) {
   paste(labels, collapse = ", ")
 }
 
-prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, normalization = "Raw values", response_transform = "As entered") {
+prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, normalization = "Raw values", response_transform = "As entered", control_100 = NA_real_, control_0 = NA_real_) {
   df <- data
   selected_group <- group_col
 
@@ -318,7 +365,7 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
 
   split_groups <- split(df, df$group)
   normalized_groups <- lapply(split_groups, function(piece) {
-    piece$response <- normalize_vector(piece$response, normalization)
+    piece$response <- normalize_vector(piece$response, normalization, control_100 = control_100, control_0 = control_0)
     piece$response <- transform_response_vector(piece$response, response_transform)
     piece
   })
@@ -335,8 +382,20 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
     sprintf("Removed rows with dose <= 0: %s", removed_non_positive),
     sprintf("Groups detected: %s", length(unique(df$group))),
     sprintf("Groups fit-ready (>=4 distinct doses): %s", sum(diagnostics_df$can_fit)),
+    sprintf("Normalization: %s", normalization),
     sprintf("Response transform: %s", response_transform)
   )
+
+  if (identical(normalization, manual_control_normalization)) {
+    notes <- c(
+      notes,
+      sprintf(
+        "Manual control normalization: 100%% control = %s, 0%% control = %s. Formula used: 100 * (Y - control_0) / (control_100 - control_0).",
+        format_decimal_text(control_100, 4),
+        format_decimal_text(control_0, 4)
+      )
+    )
+  }
 
   if (nrow(problem_groups) > 0) {
     notes <- c(
@@ -511,8 +570,8 @@ encode_parameters <- function(bottom, top, ic50_param, hill, asymmetry, model) {
   stop("Unknown model selected.")
 }
 
-compute_half_max_ic50 <- function(params, model, direction, observed_dose) {
-  target_response <- 50
+compute_half_max_ic50 <- function(params, model, direction, observed_dose, potency_metric = "IC50") {
+  target_response <- potency_target_response(params, potency_metric)
   search_dose <- c(observed_dose, params$ic50_param)
   search_dose <- search_dose[is.finite(search_dose) & search_dose > 0]
   lower <- log10(max(min(search_dose, na.rm = TRUE) / 1000, .Machine$double.eps))
@@ -561,7 +620,7 @@ bootstrap_group_data <- function(raw_group_df) {
   out
 }
 
-estimate_ic50_uncertainty <- function(raw_group_df, group_name, fit_to, model, direction, weighting, curve_points, use_log10_axis, extend_curve_toward_zero, extra_log_decades, bootstrap_iterations, ic50_decimals = 2, progress_step = NULL) {
+estimate_ic50_uncertainty <- function(raw_group_df, group_name, fit_to, model, direction, weighting, curve_points, use_log10_axis, extend_curve_toward_zero, extra_log_decades, bootstrap_iterations, ic50_decimals = 2, potency_metric = "IC50", progress_step = NULL) {
   if (bootstrap_iterations < 2 || length(unique(raw_group_df$dose)) < 4) {
     return(empty_uncertainty())
   }
@@ -583,7 +642,8 @@ estimate_ic50_uncertainty <- function(raw_group_df, group_name, fit_to, model, d
         use_log10_axis = use_log10_axis,
         extend_curve_toward_zero = extend_curve_toward_zero,
         extra_log_decades = extra_log_decades,
-        ic50_decimals = ic50_decimals
+        ic50_decimals = ic50_decimals,
+        potency_metric = potency_metric
       ),
       silent = TRUE
     )
@@ -657,12 +717,15 @@ detect_direction_mismatch <- function(x, y, selected_direction) {
   )
 }
 
-assess_ic50_reliability <- function(df, params, ic50_value, direction, ic50_decimals = 2) {
+assess_ic50_reliability <- function(df, params, ic50_value, direction, ic50_decimals = 2, potency_metric = "IC50") {
   observed_min <- min(df$response, na.rm = TRUE)
   observed_max <- max(df$response, na.rm = TRUE)
   min_dose <- min(df$dose, na.rm = TRUE)
   max_dose <- max(df$dose, na.rm = TRUE)
-  crosses_50_observed <- observed_min <= 50 && observed_max >= 50
+  target_response <- potency_target_response(params, potency_metric)
+  target_reason <- potency_target_reason(potency_metric)
+  target_phrase <- potency_target_phrase(potency_metric)
+  crosses_50_observed <- observed_min <= target_response && observed_max >= target_response
 
   interpretation <- if (is.finite(ic50_value)) format_decimal_text(ic50_value, ic50_decimals) else NA_character_
   reliability <- "Reliable"
@@ -670,28 +733,28 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction, ic50_deci
   reason_flags <- character(0)
 
   if (!crosses_50_observed) {
-    reliability <- "Observed range does not cross 50%"
-    reason_flags <- c(reason_flags, "50% not reached")
-    if (identical(direction, "Increasing") && observed_max < 50) {
-      interpretation <- paste0("50% not reached (> ", format_decimal_text(max_dose, ic50_decimals), ")")
-      warning_text <- "Observed response never reaches 50%; IC50 is above the highest tested concentration."
-    } else if (identical(direction, "Decreasing") && observed_min > 50) {
-      interpretation <- paste0("50% not reached (< ", format_decimal_text(min_dose, ic50_decimals), ")")
-      warning_text <- "Observed response never drops to 50%; IC50 is below the lowest tested concentration."
+    reliability <- reliability_target_not_reached
+    reason_flags <- c(reason_flags, target_reason)
+    if (identical(direction, "Increasing") && observed_max < target_response) {
+      interpretation <- paste0(target_reason, " (> ", format_decimal_text(max_dose, ic50_decimals), ")")
+      warning_text <- sprintf("Observed response never reaches the %s target; the fitted potency value is above the highest tested concentration.", target_phrase)
+    } else if (identical(direction, "Decreasing") && observed_min > target_response) {
+      interpretation <- paste0(target_reason, " (< ", format_decimal_text(min_dose, ic50_decimals), ")")
+      warning_text <- sprintf("Observed response never drops to the %s target; the fitted potency value is below the lowest tested concentration.", target_phrase)
     } else {
-      warning_text <- "Observed data do not span the 50% response level."
+      warning_text <- sprintf("Observed data do not span the %s target response level.", target_phrase)
     }
   }
 
   if (is.finite(ic50_value) && (ic50_value < min_dose || ic50_value > max_dose)) {
     if (identical(reliability, "Reliable")) {
-      reliability <- "IC50 outside tested range"
+      reliability <- reliability_extrapolated
       interpretation <- paste0("Extrapolated (", format_decimal_text(ic50_value, ic50_decimals), ")")
     }
-    reason_flags <- c(reason_flags, "IC50 outside tested range")
+    reason_flags <- c(reason_flags, "Value outside tested range")
     warning_text <- join_messages(
       warning_text,
-      "Fitted IC50 is outside the tested concentration range and should be treated as extrapolated."
+      "The fitted potency value is outside the tested concentration range and should be treated as extrapolated."
     )
   }
 
@@ -732,7 +795,7 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction, ic50_deci
   )
 }
 
-fit_single_group <- function(df, group_name, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, ic50_decimals = 2) {
+fit_single_group <- function(df, group_name, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, ic50_decimals = 2, potency_metric = "IC50") {
   if (identical(direction, "Auto-detect")) {
     direction_check <- detect_direction_mismatch(df$dose, df$response, "Increasing")
     candidate_directions <- unique(c(direction_check$expected_direction, "Increasing", "Decreasing"))
@@ -748,7 +811,8 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
           use_log10_axis = use_log10_axis,
           extend_curve_toward_zero = extend_curve_toward_zero,
           extra_log_decades = extra_log_decades,
-          ic50_decimals = ic50_decimals
+          ic50_decimals = ic50_decimals,
+          potency_metric = potency_metric
         ),
         silent = TRUE
       )
@@ -879,9 +943,9 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
   sse <- sum((y - fitted_values)^2)
   sst <- sum((y - mean(y))^2)
   r_squared <- if (sst > 0) 1 - sse / sst else NA_real_
-  half_max_ic50 <- compute_half_max_ic50(params, model, direction, x)
+  half_max_ic50 <- compute_half_max_ic50(params, model, direction, x, potency_metric = potency_metric)
   direction_check <- detect_direction_mismatch(x, y, direction)
-  reliability <- assess_ic50_reliability(df, params, half_max_ic50, direction, ic50_decimals = ic50_decimals)
+  reliability <- assess_ic50_reliability(df, params, half_max_ic50, direction, ic50_decimals = ic50_decimals, potency_metric = potency_metric)
   fit_warning <- reliability$warning_text
 
   if (isTRUE(direction_check$mismatch)) {
@@ -899,6 +963,7 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
   list(
     result_row = data.frame(
       group = group_name,
+      potency_metric = potency_metric,
       model = model,
       direction = direction,
       ic50 = half_max_ic50,
@@ -948,6 +1013,7 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
 failed_fit_row <- function(group_name, model, direction, n_points, status_text) {
   data.frame(
     group = group_name,
+    potency_metric = NA_character_,
     model = model,
     direction = direction,
     ic50 = NA_real_,
@@ -980,11 +1046,13 @@ failed_fit_row <- function(group_name, model, direction, n_points, status_text) 
   )
 }
 
-status_report_numeric <- "Report numeric IC50"
-status_not_reached <- "Do not report numeric IC50 (50% not reached)"
-status_extrapolated <- "Do not report numeric IC50 (extrapolated)"
-status_review_fit <- "Numeric IC50 shown; review fit"
+status_report_numeric <- "Report numeric potency value"
+status_not_reached <- "Do not report numeric value (target not reached)"
+status_extrapolated <- "Do not report numeric value (extrapolated)"
+status_review_fit <- "Numeric value shown; review fit"
 status_no_fit <- "No fit available"
+reliability_target_not_reached <- "Target response not reached"
+reliability_extrapolated <- "Value outside tested range"
 
 reporting_status_label <- function(fit_status, fit_reliability) {
   if (!identical(fit_status, "OK")) {
@@ -995,11 +1063,11 @@ reporting_status_label <- function(fit_status, fit_reliability) {
     return(status_report_numeric)
   }
 
-  if (identical(fit_reliability, "Observed range does not cross 50%")) {
+  if (identical(fit_reliability, reliability_target_not_reached)) {
     return(status_not_reached)
   }
 
-  if (identical(fit_reliability, "IC50 outside tested range")) {
+  if (identical(fit_reliability, reliability_extrapolated)) {
     return(status_extrapolated)
   }
 
@@ -1015,12 +1083,12 @@ reporting_note_label <- function(fit_status, fit_reliability, ic50_interpretatio
     return("")
   }
 
-  if (identical(fit_reliability, "Observed range does not cross 50%") &&
+  if (identical(fit_reliability, reliability_target_not_reached) &&
       nzchar(ic50_interpretation %||% "")) {
     return(ic50_interpretation)
   }
 
-  if (identical(fit_reliability, "IC50 outside tested range") &&
+  if (identical(fit_reliability, reliability_extrapolated) &&
       nzchar(ic50_interpretation %||% "")) {
     return(ic50_interpretation)
   }
@@ -1032,7 +1100,7 @@ reporting_note_label <- function(fit_status, fit_reliability, ic50_interpretatio
   fit_warning %||% ""
 }
 
-refresh_results_display <- function(result_df, uncertainty_method, decimals = 2) {
+refresh_results_display <- function(result_df, uncertainty_method, decimals = 2, potency_metric = "IC50") {
   if (!nrow(result_df)) {
     return(result_df)
   }
@@ -1047,16 +1115,16 @@ refresh_results_display <- function(result_df, uncertainty_method, decimals = 2)
     reliability <- refreshed$fit_reliability[i]
     direction <- refreshed$direction[i]
 
-    if (identical(reliability, "Observed range does not cross 50%")) {
+    if (identical(reliability, reliability_target_not_reached)) {
       if (identical(direction, "Increasing") && is.finite(refreshed$max_tested_concentration[i])) {
-        return(paste0("50% not reached (> ", format_decimal_text(refreshed$max_tested_concentration[i], decimals), ")"))
+        return(paste0(potency_target_reason(potency_metric), " (> ", format_decimal_text(refreshed$max_tested_concentration[i], decimals), ")"))
       }
       if (identical(direction, "Decreasing") && is.finite(refreshed$min_tested_concentration[i])) {
-        return(paste0("50% not reached (< ", format_decimal_text(refreshed$min_tested_concentration[i], decimals), ")"))
+        return(paste0(potency_target_reason(potency_metric), " (< ", format_decimal_text(refreshed$min_tested_concentration[i], decimals), ")"))
       }
     }
 
-    if (identical(reliability, "IC50 outside tested range") && is.finite(refreshed$ic50[i])) {
+    if (identical(reliability, reliability_extrapolated) && is.finite(refreshed$ic50[i])) {
       return(paste0("Extrapolated (", format_decimal_text(refreshed$ic50[i], decimals), ")"))
     }
 
@@ -1068,7 +1136,7 @@ refresh_results_display <- function(result_df, uncertainty_method, decimals = 2)
       return(refreshed$ic50_reported[i] %||% NA_character_)
     }
 
-    if (identical(refreshed$fit_reliability[i], "Observed range does not cross 50%")) {
+    if (identical(refreshed$fit_reliability[i], reliability_target_not_reached)) {
       return(refreshed$ic50_interpretation[i] %||% NA_character_)
     }
 
@@ -1110,9 +1178,9 @@ analysis_status_levels <- c(
 )
 
 analysis_status_descriptions <- c(
-  "Numeric IC50 reportable",
-  "50% not reached",
-  "IC50 extrapolated",
+  "Numeric potency value reportable",
+  "Target not reached",
+  "Value extrapolated",
   "Review fit before reporting",
   "No fit available"
 )
@@ -1126,7 +1194,7 @@ summarize_analysis_results <- function(result_df) {
   reason_counts <- sort(table(fit_reasons), decreasing = TRUE)
   numeric_without_50_count <- sum(
     result_df$fit_status == "OK" &
-      grepl("50% not reached", result_df$fit_reason %||% "", fixed = TRUE) &
+      grepl("not reached", result_df$fit_reason %||% "", fixed = TRUE) &
       is.finite(result_df$ic50),
     na.rm = TRUE
   )
@@ -1138,7 +1206,7 @@ summarize_analysis_results <- function(result_df) {
   )
 }
 
-analysis_summary_modal <- function(summary_info, comparison = NULL, selected_model = NULL) {
+analysis_summary_modal <- function(summary_info, comparison = NULL, selected_model = NULL, potency_metric = "IC50") {
   status_items <- Map(function(status_label, display_label) {
     count_value <- summary_info$counts[[status_label]]
     if (!isTRUE(count_value > 0)) {
@@ -1165,7 +1233,7 @@ analysis_summary_modal <- function(summary_info, comparison = NULL, selected_mod
       if (nrow(recommended_row) == 1) {
         tags$ul(
           class = "analysis-summary-list",
-          tags$li(sprintf("Reportable numeric IC50 values: %s", recommended_row$numeric_ic50_reportable[1])),
+          tags$li(sprintf("Reportable numeric %s values: %s", potency_metric_label(potency_metric), recommended_row$numeric_ic50_reportable[1])),
           tags$li(sprintf("Groups fit: %s", recommended_row$groups_fit[1])),
           tags$li(sprintf("Groups needing review: %s", recommended_row$review_before_reporting[1])),
           tags$li(sprintf("Median R-squared: %s", format_signif_text(recommended_row$median_r_squared[1], 3)))
@@ -1187,15 +1255,17 @@ analysis_summary_modal <- function(summary_info, comparison = NULL, selected_mod
     easyClose = TRUE,
     size = "m",
     footer = modalButton("Close"),
-    tags$p("Review these points before reporting IC50 values from this run."),
+    tags$p(sprintf("Review these points before reporting %s values from this run.", potency_metric_label(potency_metric))),
     tags$ul(class = "analysis-summary-list", status_items),
     if (isTRUE(summary_info$numeric_without_50_count > 0)) {
       tags$div(
         class = "analysis-summary-tip",
         tags$strong("Warning: "),
         sprintf(
-          "%s group(s) still have a numeric IC50 even though the observed data did not cross 50%%. Treat those values cautiously.",
+          "%s group(s) still have a numeric %s value even though the observed data did not reach the target response. Treat those values cautiously.",
           summary_info$numeric_without_50_count
+          ,
+          potency_metric_label(potency_metric)
         )
       )
     },
@@ -1207,12 +1277,12 @@ analysis_summary_modal <- function(summary_info, comparison = NULL, selected_mod
     tags$div(
       class = "analysis-summary-tip",
       tags$strong("Tip: "),
-      "Use reporting_status to decide whether a numeric IC50 should be reported, fit_reason for the short cause, and reporting_note for the longer explanation in the exported results."
+      sprintf("Use reporting_status to decide whether a numeric %s value should be reported, fit_reason for the short cause, and reporting_note for the longer explanation in the exported results.", potency_metric_label(potency_metric))
     )
   )
 }
 
-fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, uncertainty_method = "None", bootstrap_iterations = 200, ic50_decimals = 2, progress_callback = NULL) {
+fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, uncertainty_method = "None", bootstrap_iterations = 200, ic50_decimals = 2, potency_metric = "IC50", progress_callback = NULL) {
   fit_source <- if (identical(fit_to, "Group means")) prepared$summary else prepared$raw
   split_groups <- split(fit_source, fit_source$group)
   diagnostics_df <- group_diagnostics(fit_source)
@@ -1259,7 +1329,8 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
         use_log10_axis = use_log10_axis,
         extend_curve_toward_zero = extend_curve_toward_zero,
         extra_log_decades = extra_log_decades,
-        ic50_decimals = ic50_decimals
+        ic50_decimals = ic50_decimals,
+        potency_metric = potency_metric
       ),
       error = function(e) {
         list(
@@ -1293,6 +1364,7 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
         extra_log_decades = extra_log_decades,
         bootstrap_iterations = bootstrap_iterations,
         ic50_decimals = ic50_decimals,
+        potency_metric = potency_metric,
         progress_step = step_progress
       )
 
@@ -1317,7 +1389,7 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
     }
 
     if (fits[[group_name]]$result_row$fit_status[1] == "OK" &&
-        identical(fits[[group_name]]$result_row$fit_reliability[1], "Observed range does not cross 50%")) {
+        identical(fits[[group_name]]$result_row$fit_reliability[1], reliability_target_not_reached)) {
       fits[[group_name]]$result_row$ic50[1] <- NA_real_
       fits[[group_name]]$result_row$ic50_reported[1] <- fits[[group_name]]$result_row$ic50_interpretation[1]
     }
@@ -1369,7 +1441,10 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
   if (!has_fit) {
     fit_messages <- c(
       fit_messages,
-      "No IC50 curve could be fit with the current grouping. Try selecting the compound/sample column as Group, or set Group/compound to None if your file contains only one series."
+      sprintf(
+        "No %s curve could be fit with the current grouping. Try selecting the compound/sample column as Group, or set Group/compound to None if your file contains only one series.",
+        potency_metric_label(potency_metric)
+      )
     )
   }
 
@@ -1389,7 +1464,7 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
   if (!identical(uncertainty_method, "None")) {
     fit_messages <- c(
       fit_messages,
-      paste0("IC50 uncertainty reported as ", uncertainty_method, " using bootstrap resampling (n = ", bootstrap_iterations, ").")
+      paste0(potency_metric_label(potency_metric), " uncertainty reported as ", uncertainty_method, " using bootstrap resampling (n = ", bootstrap_iterations, ").")
     )
   }
 
@@ -1415,7 +1490,7 @@ model_parameter_count <- function(model) {
   )
 }
 
-compare_models <- function(prepared, fit_to, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, ic50_decimals = 2, progress_callback = NULL) {
+compare_models <- function(prepared, fit_to, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, ic50_decimals = 2, potency_metric = "IC50", progress_callback = NULL) {
   model_fits <- vector("list", length(all_model_choices))
   names(model_fits) <- all_model_choices
 
@@ -1437,6 +1512,7 @@ compare_models <- function(prepared, fit_to, direction, weighting, curve_points,
         uncertainty_method = "None",
         bootstrap_iterations = 20,
         ic50_decimals = ic50_decimals,
+        potency_metric = potency_metric,
         progress_callback = function(detail_text, current_step, total_step_count) {
         if (!is.null(progress_callback)) {
           overall_step <- (i - 1) * max(total_step_count, 1) + current_step
@@ -1495,15 +1571,17 @@ compare_models <- function(prepared, fit_to, direction, weighting, curve_points,
 
   recommended_row <- summary_df[summary_df$model == recommended_model, , drop = FALSE]
   recommendation_text <- sprintf(
-    "Suggested model: %s. This no-bootstrap comparison prioritizes reportable numeric IC50 values first, then successful fits, then median R-squared.",
-    recommended_model
+    "Suggested model: %s. This no-bootstrap comparison prioritizes reportable numeric %s values first, then successful fits, then median R-squared.",
+    recommended_model,
+    potency_metric_label(potency_metric)
   )
 
   if (nrow(recommended_row) == 1) {
     recommendation_text <- sprintf(
-      "%s It gave %s reportable numeric IC50 value(s) across %s fitted group(s), with median R-squared %s.",
+      "%s It gave %s reportable numeric %s value(s) across %s fitted group(s), with median R-squared %s.",
       recommendation_text,
       recommended_row$numeric_ic50_reportable[1],
+      potency_metric_label(potency_metric),
       recommended_row$groups_fit[1],
       format_signif_text(recommended_row$median_r_squared[1], 3)
     )
@@ -1884,7 +1962,7 @@ build_plot <- function(prepared, fit_data, input) {
   if (isTRUE(input$show_ic50_guides)) {
     ic50_df <- fit_data$results[
       is.finite(fit_data$results$ic50) &
-        fit_data$results$reporting_status == "Report numeric IC50",
+        fit_data$results$reporting_status == status_report_numeric,
       c("group", "ic50")
     ]
     if (nrow(ic50_df) > 0) {
@@ -2145,7 +2223,7 @@ ui <- fluidPage(
     div(class = "app-title", "IC50 Studio"),
     div(
       class = "app-subtitle",
-      "Load dose-response data, fit multiple sigmoid equations, calculate IC50 values, and export publication-ready plots in an open workflow."
+      "Load dose-response data, fit multiple sigmoid equations, calculate IC50 or EC50 values, and export publication-ready plots in an open workflow."
     ),
     sidebarLayout(
       sidebarPanel(
@@ -2156,7 +2234,7 @@ ui <- fluidPage(
           actionButton("run_analysis", "Run analysis", class = "btn-primary run-button"),
           div(
             class = "run-copy",
-            div(class = "run-copy-title", "Refresh fits, IC50 values, and warnings"),
+            div(class = "run-copy-title", "Refresh fits, potency values, and warnings"),
             div(class = "run-copy-text", "Change settings, then run the analysis to update the curves, result table, and model suggestions.")
           )
         ),
@@ -2182,9 +2260,16 @@ ui <- fluidPage(
             choices = c(
               "Raw values",
               "Normalize 0 to 100 (min to max)",
-              "Normalize 100 to 0 (max to min)"
+              "Normalize 100 to 0 (max to min)",
+              manual_control_normalization
             ),
             selected = "Raw values"
+          ),
+          conditionalPanel(
+            condition = sprintf("input.normalization === '%s'", manual_control_normalization),
+            numericInput("control_100_value", "100% control response", value = 100, step = 0.1),
+            numericInput("control_0_value", "0% control response", value = 0, step = 0.1),
+            helpText("Useful for absolute-style IC50 or EC50 analysis based on assay controls. Formula: 100 * (Y - control_0) / (control_100 - control_0).")
           ),
           selectInput(
             "fit_to",
@@ -2210,6 +2295,13 @@ ui <- fluidPage(
             choices = all_model_choices,
             selected = "4PL"
           ),
+          selectInput(
+            "potency_metric",
+            "Potency metric",
+            choices = c("IC50", "EC50"),
+            selected = "IC50"
+          ),
+          helpText("IC50 uses the response = 50 target. EC50 uses the half-max effect between the fitted bottom and top."),
           checkboxInput("compare_models", "Compare all models first (no bootstrap)", value = FALSE),
           helpText("Use this before bootstrap to see which equation gives the most reportable fits for your dataset."),
           selectInput(
@@ -2220,13 +2312,13 @@ ui <- fluidPage(
           ),
           selectInput(
             "ic50_uncertainty",
-            "IC50 uncertainty",
+            "Potency uncertainty",
             choices = c("95% CI", "\u00b1 SD", "\u00b1 SEM", "None"),
             selected = "None"
           ),
-          numericInput("ic50_decimals", "IC50 decimal places", value = 2, min = 0, max = 8, step = 1),
+          numericInput("ic50_decimals", "Potency decimal places", value = 2, min = 0, max = 8, step = 1),
           numericInput("bootstrap_iterations", "Bootstrap iterations", value = 50, min = 20, max = 2000, step = 10),
-          helpText("Use 100 to 200 bootstrap iterations for publication-oriented IC50 uncertainty. Reported IC50 values and \u00b1 uncertainty use the same number of decimals."),
+          helpText("Use 100 to 200 bootstrap iterations for publication-oriented potency uncertainty. Reported potency values and \u00b1 uncertainty use the same number of decimals."),
           numericInput("curve_points", "Curve resolution", value = 250, min = 100, max = 1000, step = 50)
         ),
         tags$details(
@@ -2381,6 +2473,7 @@ ui <- fluidPage(
             tags$p("Recommended columns: one numeric concentration or dose column, one numeric response column, and an optional grouping column such as compound, sample, treatment, or replicate set."),
             tags$p("Concentration values must be greater than zero if you want a log-scale x axis or a standard IC50 fit."),
             tags$p("The app does not assume a fixed unit. You can use nM, uM, ug/mL, mg/mL, or any other unit as long as the concentration column is numeric, then write the exact unit in the x-axis title."),
+            tags$p("If you want GraphPad-like absolute normalization, choose 'Normalize using manual 0% and 100% controls' and enter the assay control responses used to define 100% and 0%."),
             br(),
             h4("Choosing a model"),
             tags$p("4PL is a good general starting point when both lower and upper plateaus are visible."),
@@ -2400,8 +2493,8 @@ ui <- fluidPage(
             h4("Understanding fit_reason"),
             tags$p("Top far above data: the fitted upper plateau is much higher than the observed points, so a flexible model such as 4PL is extrapolating beyond the measured range."),
             tags$p("Bottom far below data: the fitted lower plateau falls well below the observed low-concentration responses."),
-            tags$p("50% not reached: the observed data never cross the 50% response level, so the app does not report a numeric IC50."),
-            tags$p("IC50 outside tested range: the fitted crossing of 50% lies outside the concentration range you actually tested."),
+            tags$p("Target not reached: the observed data do not cross the response target used for the selected potency metric, so the app does not report a numeric value."),
+            tags$p("Value outside tested range: the fitted potency value lies outside the concentration range you actually tested."),
             tags$p("Flat or invalid fitted range: the model collapsed to a nearly flat or otherwise implausible curve."),
             tags$p("If several groups are flagged for top or bottom problems, try a simpler model such as 3PL or expand the tested concentration range."),
             br(),
@@ -2564,7 +2657,9 @@ server <- function(input, output, session) {
         response_col = input$response_col,
         group_col = input$group_col,
         normalization = input$normalization,
-        response_transform = input$response_transform
+        response_transform = input$response_transform,
+        control_100 = input$control_100_value %||% NA_real_,
+        control_0 = input$control_0_value %||% NA_real_
       )
 
       comparison <- NULL
@@ -2580,6 +2675,7 @@ server <- function(input, output, session) {
           extend_curve_toward_zero = input$extend_curve_toward_zero,
           extra_log_decades = input$extra_log_decades,
           ic50_decimals = input$ic50_decimals,
+          potency_metric = input$potency_metric,
           progress_callback = function(detail_text, current_step, total_steps) {
             setProgress(
               value = 0.05 + (comparison_end - 0.05) * current_step / max(total_steps, 1),
@@ -2611,6 +2707,7 @@ server <- function(input, output, session) {
           uncertainty_method = input$ic50_uncertainty,
           bootstrap_iterations = input$bootstrap_iterations,
           ic50_decimals = input$ic50_decimals,
+          potency_metric = input$potency_metric,
           progress_callback = function(detail_text, current_step, total_steps) {
             setProgress(
               value = fit_start + (1 - fit_start) * current_step / max(total_steps, 1),
@@ -2634,11 +2731,12 @@ server <- function(input, output, session) {
       showModal(analysis_summary_modal(
         summary_info = summary_info,
         comparison = comparison_result,
-        selected_model = input$model_equation
+        selected_model = input$model_equation,
+        potency_metric = input$potency_metric
       ))
     } else {
       showNotification(
-        "Analysis complete. All fitted groups are currently reportable as numeric IC50 values.",
+        sprintf("Analysis complete. All fitted groups are currently reportable as numeric %s values.", potency_metric_label(input$potency_metric)),
         type = "message",
         duration = 5
       )
@@ -2668,12 +2766,13 @@ server <- function(input, output, session) {
     result_df <- refresh_results_display(
       analysis_result()$fit$results,
       uncertainty_method = input$ic50_uncertainty,
-      decimals = input$ic50_decimals
+      decimals = input$ic50_decimals,
+      potency_metric = input$potency_metric
     )
     result_df$needs_50_crossing_warning <- with(
       result_df,
       fit_status == "OK" &
-        grepl("50% not reached", ifelse(is.na(fit_reason), "", fit_reason), fixed = TRUE) &
+        grepl("not reached", ifelse(is.na(fit_reason), "", fit_reason), fixed = TRUE) &
         is.finite(ic50)
     )
     ic50_numeric_cols <- intersect(
@@ -2701,6 +2800,10 @@ server <- function(input, output, session) {
     display_cols <- intersect(display_order, names(result_df))
     hidden_cols <- setdiff(names(result_df), display_cols)
     visible_df <- result_df[, c(display_cols, hidden_cols), drop = FALSE]
+    names(visible_df) <- rename_potency_column_names(names(visible_df), input$potency_metric)
+    potency_value_col <- potency_metric_lower(input$potency_metric)
+    potency_reported_col <- paste0(potency_value_col, "_reported")
+    hidden_display_cols <- rename_potency_column_names(hidden_cols, input$potency_metric)
 
     dt <- datatable(
       visible_df,
@@ -2713,7 +2816,7 @@ server <- function(input, output, session) {
         scrollX = TRUE,
         autoWidth = TRUE,
         columnDefs = list(
-          list(visible = FALSE, targets = match(hidden_cols, names(visible_df)) - 1)
+          list(visible = FALSE, targets = match(hidden_display_cols, names(visible_df)) - 1)
         )
       )
     )
@@ -2743,7 +2846,7 @@ server <- function(input, output, session) {
     )
     dt <- formatStyle(
       dt,
-      c("ic50", "ic50_reported"),
+      c(potency_value_col, potency_reported_col),
       valueColumns = "needs_50_crossing_warning",
       backgroundColor = styleEqual(c(TRUE, FALSE), c("#fff1c2", "")),
       color = styleEqual(c(TRUE, FALSE), c("#9a3412", "")),
@@ -2761,7 +2864,7 @@ server <- function(input, output, session) {
 
     tagList(
       tags$p(comparison$recommendation_text),
-      tags$p("Bootstrap is not used in this comparison. If you want uncertainty, apply or choose the suggested model and run the analysis again with IC50 uncertainty enabled.")
+      tags$p(sprintf("Bootstrap is not used in this comparison. If you want uncertainty, apply or choose the suggested model and run the analysis again with %s uncertainty enabled.", potency_metric_label(input$potency_metric)))
     )
   })
 
@@ -2847,14 +2950,16 @@ server <- function(input, output, session) {
 
   output$download_results <- downloadHandler(
     filename = function() {
-      paste0("dose_response_ic50_results_", Sys.Date(), ".csv")
+      paste0("dose_response_", potency_metric_lower(input$potency_metric), "_results_", Sys.Date(), ".csv")
     },
     content = function(file) {
       export_df <- refresh_results_display(
         analysis_result()$fit$results,
         uncertainty_method = input$ic50_uncertainty,
-        decimals = input$ic50_decimals
+        decimals = input$ic50_decimals,
+        potency_metric = input$potency_metric
       )
+      names(export_df) <- rename_potency_column_names(names(export_df), input$potency_metric)
       utils::write.csv(export_df, file, row.names = FALSE)
     }
   )
