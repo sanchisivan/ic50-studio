@@ -1,34 +1,24 @@
-# Dose-Response IC50 Lab
+# IC50 Studio
 
-This Shiny app loads dose-response data, fits several common sigmoid equations, plots the curves, and reports IC50 values in an open workflow.
+IC50 Studio is an R Shiny app for loading dose-response data, fitting common sigmoid models, calculating IC50 values, comparing equations, and exporting publication-ready plots.
+
+It is designed for people who normally work in spreadsheet-based curve-fitting tools but want an open, editable workflow in R.
 
 ## Features
 
 - Import `csv`, `tsv`, `txt`, `xls`, and `xlsx`
 - Map your own concentration/dose, response, and grouping columns
 - Fit `4PL`, `5PL`, `3PL (Hill fixed = 1)`, `3PL (Bottom = 0)`, and `3PL (Top = 100)`
-- Choose decreasing or increasing curves
-- Fit either group means or all observations
-- Optional normalization and SD-based weighting
-- Export the plot as PNG and the fit results as CSV
+- Use `Auto-detect`, `Increasing`, or `Decreasing` curve direction
+- Fit either `Group means` or `All observations`
+- Compare all models without bootstrap and get a suggested equation
+- Report IC50 with `None`, `95% CI`, `+/- SD`, or `+/- SEM`
+- Export plots and results tables
+- Flag non-reportable IC50 values such as curves that never reach 50%
 
-## Expected data
+## Installation
 
-Your file should include:
-
-- one numeric concentration or dose column
-- one numeric response column
-- one optional grouping column such as `compound`
-
-Concentration values must be greater than zero for standard log-scale curve fitting.
-
-The app does not assume a fixed concentration unit. You can use nM, uM, mg/mL, or any other unit as long as the column is numeric, then set the exact unit in the x-axis title.
-
-An example file is included at [example_dose_response.csv](C:\Users\HP\OneDrive\Escritorio\Ivan\backup-nuevo\Desktop\PEPTIDOS\Programas\app_ic50\example_dose_response.csv).
-
-## Install packages
-
-Run this once in R:
+Install the required R packages once:
 
 ```r
 install.packages(c("shiny", "bslib", "ggplot2", "DT", "readxl"))
@@ -36,8 +26,85 @@ install.packages(c("shiny", "bslib", "ggplot2", "DT", "readxl"))
 
 ## Run the app
 
-From this folder in R or RStudio:
+Open R or RStudio in this folder and run:
 
 ```r
 shiny::runApp()
 ```
+
+## Expected data format
+
+Your input file should contain:
+
+- one numeric concentration or dose column
+- one numeric response column
+- one optional grouping column such as `compound`, `sample`, or `treatment`
+
+Notes:
+
+- Concentration values must be greater than zero for standard log-scale fitting.
+- The app does not assume a fixed concentration unit.
+- You can use `nM`, `uM`, `ug/mL`, `mg/mL`, or any other unit as long as the concentration column is numeric.
+- Write the exact unit you want in the x-axis title.
+
+An example file is included at [example_dose_response.csv](example_dose_response.csv).
+
+## Recommended workflow
+
+1. Upload your file.
+2. Map the concentration, response, and optional group columns.
+3. Leave `Curve direction` on `Auto-detect` unless you need to force it.
+4. Start with `IC50 uncertainty = None` for speed.
+5. If you are unsure which model to use, enable `Compare all models first (no bootstrap)`.
+6. Click `Run analysis`.
+7. Review the suggested model and the fit table.
+8. Only after the fit looks good, turn on bootstrap uncertainty for final reporting.
+9. Adjust plot styling and export.
+
+## How to choose a model
+
+- `4PL`: good general starting point when both lower and upper plateaus are visible
+- `3PL (Hill fixed = 1)`: useful when you want a simpler fixed-slope model
+- `3PL (Bottom = 0)`: useful when the response should start near 0
+- `3PL (Top = 100)`: useful when the response should approach 100
+- `5PL`: useful when the curve is asymmetric
+
+If you are unsure, use the model comparison option first.
+
+## Interpreting the fit table
+
+The app reports a `reporting_status` column to make it clearer what should and should not be reported:
+
+- `Report numeric IC50`: the fit looks acceptable for numeric reporting
+- `Do not report numeric IC50 (50% not reached)`: the observed data never reach 50%, so report this as above or below the tested range instead of giving a numeric IC50
+- `Do not report numeric IC50 (extrapolated)`: the fitted IC50 falls outside the tested concentration range
+- `Review fit before reporting`: the fit exists, but the curve shape or plateau behavior needs caution
+- `No fit available`: the curve could not be fit
+
+## IC50 uncertainty
+
+IC50 uncertainty is optional and uses bootstrap resampling.
+
+- `95% CI` is usually the best choice for publication
+- `+/- SD` and `+/- SEM` are derived from the bootstrap distribution of IC50
+- Keep uncertainty set to `None` during exploration for speed
+- Around `50` bootstrap iterations is useful for a quick preview
+- Around `100 to 200` bootstrap iterations is a better starting point for final reporting
+
+## Plotting notes
+
+- Percent-like data will default to a `0 to 100` y-axis
+- The default y-axis includes `50` and `100` as reference values
+- You can hide the plot title and subtitle with checkboxes
+- Styling options, axis controls, and export settings are grouped in dropdown sections to keep the main panel shorter
+
+## Troubleshooting
+
+- If the fit looks flat or wrong, first check the selected group column and curve direction.
+- If the app reports that 50% was not reached, expand the concentration range instead of forcing a numeric IC50.
+- If you are working with inhibition data, consider `Invert as 100 - response`.
+- If different compounds behave very differently, use the model comparison option before enabling bootstrap.
+
+## Included help
+
+The app also includes an `Instructions` tab with a built-in quick guide, model advice, uncertainty notes, and troubleshooting tips.

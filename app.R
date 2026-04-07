@@ -1253,6 +1253,7 @@ plot_palette <- function(n) {
 publication_palette <- function(n, palette_name) {
   values <- switch(
     palette_name,
+    "All black" = rep("#000000", max(n, 1)),
     "Bright contrast" = c("#1f3cff", "#ff2020", "#00c83c", "#c227ff", "#ff8c00", "#111111", "#996515", "#0f1e9c", "#7a0c64"),
     "Colorblind safe" = c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7"),
     "Nature muted" = c("#3c5488", "#00a087", "#e64b35", "#4dbbd5", "#f39b7f", "#8491b4", "#91d1c2", "#dc0000"),
@@ -1370,6 +1371,8 @@ plot_preset_values <- function(preset_name) {
       plot_style = "Publication boxed",
       palette_name = "Bright contrast",
       legend_position = "Right",
+      legend_content = "Points and lines",
+      show_legend_title = TRUE,
       background_fill = "White",
       use_group_shapes = TRUE,
       show_half_max_line = TRUE,
@@ -1381,6 +1384,8 @@ plot_preset_values <- function(preset_name) {
       plot_style = "Framed clean",
       palette_name = "Bright contrast",
       legend_position = "Right",
+      legend_content = "Points and lines",
+      show_legend_title = TRUE,
       background_fill = "White",
       use_group_shapes = TRUE,
       show_half_max_line = TRUE,
@@ -1392,6 +1397,8 @@ plot_preset_values <- function(preset_name) {
       plot_style = "Minimal clean",
       palette_name = "Nature muted",
       legend_position = "Top",
+      legend_content = "Points and lines",
+      show_legend_title = TRUE,
       background_fill = "White",
       use_group_shapes = FALSE,
       show_half_max_line = FALSE,
@@ -1401,8 +1408,10 @@ plot_preset_values <- function(preset_name) {
     ),
     "Monochrome" = list(
       plot_style = "Classic axes",
-      palette_name = "Black and gray",
+      palette_name = "All black",
       legend_position = "Right",
+      legend_content = "Points only",
+      show_legend_title = FALSE,
       background_fill = "White",
       use_group_shapes = TRUE,
       show_half_max_line = TRUE,
@@ -1420,6 +1429,9 @@ build_plot <- function(prepared, fit_data, input) {
   names(palette_values) <- groups
   shape_values <- publication_shapes(length(groups))
   names(shape_values) <- groups
+  legend_name <- if (isTRUE(input$show_legend_title)) "Series" else NULL
+  show_point_legend <- !identical(input$legend_content, "Lines only")
+  show_line_legend <- !identical(input$legend_content, "Points only")
 
   x_breaks <- parse_numeric_values(input$x_breaks)
   y_breaks <- parse_numeric_values(input$y_breaks)
@@ -1474,14 +1486,16 @@ build_plot <- function(prepared, fit_data, input) {
         data = prepared$raw,
         aes(x = dose, y = response, color = group, shape = group),
         alpha = 0.45,
-        size = input$point_size * 0.8
+        size = input$point_size * 0.8,
+        show.legend = FALSE
       )
     } else {
       p <- p + geom_point(
         data = prepared$raw,
         aes(x = dose, y = response, color = group),
         alpha = 0.45,
-        size = input$point_size * 0.8
+        size = input$point_size * 0.8,
+        show.legend = FALSE
       )
     }
   }
@@ -1500,7 +1514,8 @@ build_plot <- function(prepared, fit_data, input) {
         ),
         width = 0.04,
         alpha = 0.65,
-        size = max(0.3, input$line_width * 0.7)
+        size = max(0.3, input$line_width * 0.7),
+        show.legend = FALSE
       )
     }
   }
@@ -1511,7 +1526,8 @@ build_plot <- function(prepared, fit_data, input) {
         data = prepared$summary,
         aes(x = dose, y = response, color = group, shape = group),
         size = input$point_size,
-        stroke = 0.8
+        stroke = 0.8,
+        show.legend = show_point_legend
       )
   } else {
     p <- p +
@@ -1519,7 +1535,8 @@ build_plot <- function(prepared, fit_data, input) {
         data = prepared$summary,
         aes(x = dose, y = response, color = group),
         size = input$point_size,
-        stroke = 0.8
+        stroke = 0.8,
+        show.legend = show_point_legend
       )
   }
 
@@ -1528,7 +1545,8 @@ build_plot <- function(prepared, fit_data, input) {
       geom_line(
         data = fit_data$curves,
         aes(x = dose, y = response, color = group),
-        size = input$line_width
+        size = input$line_width,
+        show.legend = show_line_legend
       )
   }
 
@@ -1539,7 +1557,8 @@ build_plot <- function(prepared, fit_data, input) {
         data = ic50_df,
         aes(xintercept = ic50, color = group),
         linetype = "dashed",
-        alpha = 0.5
+        alpha = 0.5,
+        show.legend = FALSE
       )
     }
   }
@@ -1549,13 +1568,12 @@ build_plot <- function(prepared, fit_data, input) {
   }
 
   p <- p +
-    scale_color_manual(values = palette_values) +
+    scale_color_manual(values = palette_values, name = legend_name) +
     labs(
       title = plot_title,
       subtitle = plot_subtitle,
       x = x_label,
-      y = y_label,
-      color = "Series"
+      y = y_label
     ) +
     publication_theme(
       style_name = input$plot_style,
@@ -1565,7 +1583,17 @@ build_plot <- function(prepared, fit_data, input) {
     )
 
   if (isTRUE(input$use_group_shapes)) {
-    p <- p + scale_shape_manual(values = shape_values)
+    p <- p + scale_shape_manual(values = shape_values, name = legend_name)
+  }
+
+  if (identical(input$legend_content, "Points only")) {
+    p <- p + guides(color = guide_legend(order = 1), shape = guide_legend(order = 1))
+  } else if (identical(input$legend_content, "Lines only")) {
+    if (isTRUE(input$use_group_shapes)) {
+      p <- p + guides(shape = "none", color = guide_legend(order = 1))
+    } else {
+      p <- p + guides(color = guide_legend(order = 1))
+    }
   }
 
   if (isTRUE(input$use_log10_axis)) {
@@ -1659,6 +1687,29 @@ ui <- fluidPage(
         border: 1px solid #eadfca;
         border-radius: 14px;
       }
+      .sidebar-panel details {
+        margin-bottom: 12px;
+      }
+      .sidebar-panel details > summary {
+        cursor: pointer;
+        font-weight: 700;
+        color: #102a43;
+        list-style: none;
+      }
+      .sidebar-panel details > summary::-webkit-details-marker {
+        display: none;
+      }
+      .sidebar-panel details > summary::before {
+        content: '+';
+        display: inline-block;
+        width: 14px;
+        text-align: center;
+        margin-right: 8px;
+        color: #0f766e;
+      }
+      .sidebar-panel details[open] > summary::before {
+        content: '-';
+      }
       .nav-tabs {
         border-bottom: 1px solid #eadfca;
       }
@@ -1688,7 +1739,7 @@ ui <- fluidPage(
   ),
   div(
     class = "app-shell",
-    div(class = "app-title", "Dose-Response IC50 Lab"),
+    div(class = "app-title", "IC50 Studio"),
     div(
       class = "app-subtitle",
       "Load dose-response data, fit multiple sigmoid equations, calculate IC50 values, and export publication-ready plots in an open workflow."
@@ -1697,82 +1748,93 @@ ui <- fluidPage(
       sidebarPanel(
         class = "sidebar-panel",
         width = 4,
-        fileInput("data_file", "Upload data", accept = c(".csv", ".tsv", ".txt", ".xls", ".xlsx")),
-        actionButton("load_example", "Use example dataset", class = "btn-primary"),
-        br(), br(),
-        uiOutput("sheet_ui"),
-        uiOutput("mapping_ui"),
         actionButton("run_analysis", "Run analysis", class = "btn-primary"),
         helpText("Change settings, then click Run analysis to refresh IC50 values and plots."),
-        hr(),
-        h4("Pre-processing"),
-        selectInput(
-          "normalization",
-          "Response scaling",
-          choices = c(
-            "Raw values",
-            "Normalize 0 to 100 (min to max)",
-            "Normalize 100 to 0 (max to min)"
+        tags$details(
+          class = "well",
+          open = NA,
+          tags$summary("Data and mapping"),
+          br(),
+          fileInput("data_file", "Upload data", accept = c(".csv", ".tsv", ".txt", ".xls", ".xlsx")),
+          actionButton("load_example", "Use example dataset", class = "btn-primary"),
+          br(), br(),
+          uiOutput("sheet_ui"),
+          uiOutput("mapping_ui")
+        ),
+        tags$details(
+          class = "well",
+          open = NA,
+          tags$summary("Analysis settings"),
+          br(),
+          selectInput(
+            "normalization",
+            "Response scaling",
+            choices = c(
+              "Raw values",
+              "Normalize 0 to 100 (min to max)",
+              "Normalize 100 to 0 (max to min)"
+            ),
+            selected = "Raw values"
           ),
-          selected = "Raw values"
+          selectInput(
+            "fit_to",
+            "Fit curve using",
+            choices = c("Group means", "All observations"),
+            selected = "Group means"
+          ),
+          selectInput(
+            "response_transform",
+            "Response transform",
+            choices = c("As entered", "Invert as 100 - response", "Mirror around min/max"),
+            selected = "As entered"
+          ),
+          selectInput(
+            "direction",
+            "Curve direction",
+            choices = c("Auto-detect", "Increasing", "Decreasing"),
+            selected = "Auto-detect"
+          ),
+          selectInput(
+            "model_equation",
+            "Model",
+            choices = all_model_choices,
+            selected = "4PL"
+          ),
+          checkboxInput("compare_models", "Compare all models first (no bootstrap)", value = FALSE),
+          helpText("Use this before bootstrap to see which equation gives the most reportable fits for your dataset."),
+          selectInput(
+            "weighting",
+            "Weighting",
+            choices = c("None", "1 / SD^2 from means"),
+            selected = "None"
+          ),
+          selectInput(
+            "ic50_uncertainty",
+            "IC50 uncertainty",
+            choices = c("95% CI", "\u00b1 SD", "\u00b1 SEM", "None"),
+            selected = "None"
+          ),
+          numericInput("bootstrap_iterations", "Bootstrap iterations", value = 50, min = 20, max = 2000, step = 10),
+          helpText("Use 100 to 200 bootstrap iterations for publication-oriented IC50 uncertainty."),
+          numericInput("curve_points", "Curve resolution", value = 250, min = 100, max = 1000, step = 50)
         ),
-        selectInput(
-          "fit_to",
-          "Fit curve using",
-          choices = c("Group means", "All observations"),
-          selected = "Group means"
+        tags$details(
+          class = "well",
+          tags$summary("Plot quick controls"),
+          br(),
+          textInput("plot_title", "Plot title", value = "Dose-response curve fit"),
+          checkboxInput("show_plot_title", "Show title", value = TRUE),
+          checkboxInput("show_plot_subtitle", "Show subtitle", value = TRUE),
+          selectInput(
+            "plot_preset",
+            "Plot preset",
+            choices = c("Custom", "Journal inhibitor", "High-contrast figure", "Minimal figure", "Monochrome"),
+            selected = "Journal inhibitor"
+          ),
+          checkboxInput("use_log10_axis", "Use log10 concentration axis", value = TRUE),
+          checkboxInput("show_ic50_guides", "Show IC50 guide lines", value = TRUE),
+          checkboxInput("show_half_max_line", "Show 50% reference line", value = TRUE)
         ),
-        selectInput(
-          "response_transform",
-          "Response transform",
-          choices = c("As entered", "Invert as 100 - response", "Mirror around min/max"),
-          selected = "As entered"
-        ),
-        selectInput(
-          "direction",
-          "Curve direction",
-          choices = c("Auto-detect", "Increasing", "Decreasing"),
-          selected = "Auto-detect"
-        ),
-        hr(),
-        h4("Equation"),
-        selectInput(
-          "model_equation",
-          "Model",
-          choices = all_model_choices,
-          selected = "4PL"
-        ),
-        checkboxInput("compare_models", "Compare all models first (no bootstrap)", value = FALSE),
-        helpText("Use this before bootstrap to see which equation gives the most reportable fits for your dataset."),
-        selectInput(
-          "weighting",
-          "Weighting",
-          choices = c("None", "1 / SD^2 from means"),
-          selected = "None"
-        ),
-        selectInput(
-          "ic50_uncertainty",
-          "IC50 uncertainty",
-          choices = c("95% CI", "\u00b1 SD", "\u00b1 SEM", "None"),
-          selected = "None"
-        ),
-        numericInput("bootstrap_iterations", "Bootstrap iterations", value = 50, min = 20, max = 2000, step = 10),
-        helpText("Use 100 to 200 bootstrap iterations for publication-oriented IC50 uncertainty."),
-        numericInput("curve_points", "Curve resolution", value = 250, min = 100, max = 1000, step = 50),
-        hr(),
-        h4("Plot"),
-        textInput("plot_title", "Plot title", value = "Dose-response curve fit"),
-        checkboxInput("show_plot_title", "Show title", value = TRUE),
-        checkboxInput("show_plot_subtitle", "Show subtitle", value = TRUE),
-        selectInput(
-          "plot_preset",
-          "Plot preset",
-          choices = c("Custom", "Journal inhibitor", "High-contrast figure", "Minimal figure", "Monochrome"),
-          selected = "Journal inhibitor"
-        ),
-        checkboxInput("use_log10_axis", "Use log10 concentration axis", value = TRUE),
-        checkboxInput("show_ic50_guides", "Show IC50 guide lines", value = TRUE),
-        checkboxInput("show_half_max_line", "Show 50% reference line", value = TRUE),
         tags$details(
           class = "well",
           tags$summary("Plot styling options"),
@@ -1788,7 +1850,7 @@ ui <- fluidPage(
           selectInput(
             "palette_name",
             "Palette",
-            choices = c("Bright contrast", "Colorblind safe", "Nature muted", "Black and gray", "Earth tones", "Viridis"),
+            choices = c("Bright contrast", "All black", "Colorblind safe", "Nature muted", "Black and gray", "Earth tones", "Viridis"),
             selected = "Bright contrast"
           ),
           selectInput(
@@ -1797,6 +1859,13 @@ ui <- fluidPage(
             choices = c("Right", "Top", "Bottom", "Left", "None"),
             selected = "Right"
           ),
+          selectInput(
+            "legend_content",
+            "Legend content",
+            choices = c("Points and lines", "Points only", "Lines only"),
+            selected = "Points and lines"
+          ),
+          checkboxInput("show_legend_title", "Show legend title", value = TRUE),
           selectInput(
             "background_fill",
             "Background",
@@ -1871,27 +1940,51 @@ ui <- fluidPage(
             DTOutput("summary_data_table")
           ),
           tabPanel(
-            "Format Guide",
+            "Instructions",
             br(),
             h4("Quick start"),
             tags$p("1. Upload your file or use the example dataset."),
-            tags$p("2. Map the concentration/dose, response, and optional group columns."),
-            tags$p("3. Choose response transform and model."),
-            tags$p("4. Click Run analysis."),
-            tags$p("5. Open 'Plot styling options' only when you want to polish the figure."),
-            tags$p("6. Leave IC50 uncertainty set to None for speed. Turn on bootstrap only for final reporting."),
+            tags$p("2. Map the concentration or dose column, the response column, and an optional group column such as compound or sample."),
+            tags$p("3. Leave Curve direction on Auto-detect unless you have a strong reason to force Increasing or Decreasing."),
+            tags$p("4. Choose a model, or turn on 'Compare all models first (no bootstrap)' to get a fast suggestion."),
+            tags$p("5. Click Run analysis."),
+            tags$p("6. For final reporting, turn on IC50 uncertainty only after you are happy with the model and plot."),
             br(),
-            tags$p("Recommended columns: one numeric concentration or dose column, one numeric response column, and an optional grouping column such as compound, sample, or treatment."),
+            h4("Recommended workflow"),
+            tags$p("Start with Group means and IC50 uncertainty = None."),
+            tags$p("If you are not sure which equation to use, enable model comparison first. The app will suggest a model based on how many groups give reportable IC50 values and how well the curves fit."),
+            tags$p("Once you choose the model, run the final fit again with bootstrap uncertainty if you want 95% CI, SD, or SEM."),
+            tags$p("Use the plot controls only after the fitting looks right. Styling should be the last step, not the first."),
+            br(),
+            h4("Data format"),
             tags$p("Supported files: CSV, TSV, TXT, XLS, XLSX."),
-            tags$p("Important: concentration values must be greater than zero if you want a log-scale x axis or a standard IC50 fit."),
-            tags$p("Units are not fixed by the app. You can use nM, uM, mg/mL, or any other unit as long as the x column is numeric, then write the exact unit in the x-axis title."),
-            tags$p("For enzyme inhibition-style figures like the example you shared, use Response transform = 'Invert as 100 - response', Curve direction = 'Increasing', a 0 to 100 y-axis, and custom x breaks if you want specific concentration labels."),
-            tags$p("For most datasets, leave Curve direction on Auto-detect so the app picks the better increasing or decreasing fit for each group."),
-            tags$p("If you want a fixed-slope three-parameter dose-response fit, try '3PL (Hill fixed = 1)'."),
-            tags$p("You can turn on 'Compare all models first (no bootstrap)' to screen the equations quickly, then use the suggested model for your final bootstrap uncertainty run."),
-            tags$p("Recommended IC50 reporting: 95% CI is usually the best publication choice because it communicates uncertainty around the fitted parameter. SD is better for spread across repeats, and SEM is the least informative on its own."),
-            tags$p("Practical speed guide: keep bootstrap off during exploration. If you need uncertainty, 50 iterations is a quick preview and 100 to 200 is a better publication-oriented starting point."),
-            tags$p("If you choose 5PL, the app reports the half-max concentration solved from the fitted curve. That can differ slightly from the internal midpoint parameter when asymmetry is not 1."),
+            tags$p("Recommended columns: one numeric concentration or dose column, one numeric response column, and an optional grouping column such as compound, sample, treatment, or replicate set."),
+            tags$p("Concentration values must be greater than zero if you want a log-scale x axis or a standard IC50 fit."),
+            tags$p("The app does not assume a fixed unit. You can use nM, uM, ug/mL, mg/mL, or any other unit as long as the concentration column is numeric, then write the exact unit in the x-axis title."),
+            br(),
+            h4("Choosing a model"),
+            tags$p("4PL is a good general starting point when both lower and upper plateaus are visible."),
+            tags$p("3PL (Hill fixed = 1) is useful when you want a simpler fixed-slope model."),
+            tags$p("3PL (Bottom = 0) is useful when the response should start near 0."),
+            tags$p("3PL (Top = 100) is useful when the response should approach 100."),
+            tags$p("5PL allows asymmetry, but the reported IC50 is solved from the fitted curve and can differ from the midpoint parameter."),
+            br(),
+            h4("Interpreting the results table"),
+            tags$p("Green rows mean the app considers the IC50 suitable to report as a numeric value."),
+            tags$p("Yellow rows mean the data did not reach 50%, so you should report the result as not reaching 50% instead of giving a numeric IC50."),
+            tags$p("Orange rows mean the fitted IC50 is outside the tested range and should be treated as extrapolated."),
+            tags$p("Red rows mean the fit needs review before reporting."),
+            tags$p("Gray rows mean the app could not fit the curve."),
+            br(),
+            h4("Uncertainty"),
+            tags$p("95% CI is usually the best option for publication because it communicates uncertainty around the fitted parameter."),
+            tags$p("SD and SEM in this app come from bootstrap resampling of IC50, not from the raw response standard deviation at each concentration."),
+            tags$p("For speed, keep uncertainty off during exploration. Around 50 bootstrap iterations is a quick preview, and 100 to 200 is a more reasonable starting point for final reporting."),
+            br(),
+            h4("Troubleshooting"),
+            tags$p("If the fit looks flat or wrong, first check the selected group column and curve direction."),
+            tags$p("If the app reports that 50% was not reached, expand the concentration range instead of forcing a numeric IC50."),
+            tags$p("For enzyme inhibition-style figures, use Response transform = 'Invert as 100 - response', Increasing direction, and a 0 to 100 y-axis."),
             h4("Example layout"),
             DTOutput("example_table")
           )
@@ -1921,7 +2014,9 @@ server <- function(input, output, session) {
     updateSelectInput(session, "plot_style", selected = preset_values$plot_style)
     updateSelectInput(session, "palette_name", selected = preset_values$palette_name)
     updateSelectInput(session, "legend_position", selected = preset_values$legend_position)
+    updateSelectInput(session, "legend_content", selected = preset_values$legend_content)
     updateSelectInput(session, "background_fill", selected = preset_values$background_fill)
+    updateCheckboxInput(session, "show_legend_title", value = preset_values$show_legend_title)
     updateCheckboxInput(session, "use_group_shapes", value = preset_values$use_group_shapes)
     updateCheckboxInput(session, "show_half_max_line", value = preset_values$show_half_max_line)
     updateNumericInput(session, "base_font_size", value = preset_values$base_font_size)
