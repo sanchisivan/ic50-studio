@@ -2429,8 +2429,7 @@ ui <- fluidPage(
             tags$p("IC50 Studio is an open R Shiny app for dose-response fitting, IC50 interpretation, and publication-oriented figure export."),
             br(),
             h4("Developed by"),
-            tags$p(tags$strong("Dr. Ivan Sanchis"), " - app development and maintenance"),
-            tags$p(tags$strong("Prof. Alvaro Sebastian Siano"), " - scientific lead"),
+            tags$p(tags$strong("Dr. Ivan Sanchis")),
             br(),
             h4("Affiliation"),
             tags$p("Laboratory of Bioactive Peptides (LPB)"),
@@ -2440,12 +2439,12 @@ ui <- fluidPage(
             br(),
             h4("Contact"),
             tags$p(
-              "Ivan Sanchis: ",
+              "Institutional email: ",
               tags$a("sanchisivan@fbcb.unl.edu.ar", href = "mailto:sanchisivan@fbcb.unl.edu.ar")
             ),
             tags$p(
-              "Alvaro Sebastian Siano: ",
-              tags$a("asiano@fbcb.unl.edu.ar", href = "mailto:asiano@fbcb.unl.edu.ar")
+              "Personal email: ",
+              tags$a("sanchisivan@gmail.com", href = "mailto:sanchisivan@gmail.com")
             ),
             br(),
             h4("Repository"),

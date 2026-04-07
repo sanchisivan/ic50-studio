@@ -140,8 +140,7 @@ The app also includes an `Instructions` tab with a built-in quick guide, model a
 
 | | |
 |---|---|
-| **Dr. Ivan Sanchis** (app development) | sanchisivan@fbcb.unl.edu.ar |
-| **Prof. Alvaro Sebastian Siano** (scientific lead) | asiano@fbcb.unl.edu.ar |
+| **Dr. Ivan Sanchis** | sanchisivan@fbcb.unl.edu.ar<br>sanchisivan@gmail.com |
 
 Laboratory of Bioactive Peptides (LPB)  
 Faculty of Biochemistry and Biological Sciences (FBCB)  
