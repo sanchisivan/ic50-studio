@@ -10,13 +10,16 @@ Developed at the **Laboratory of Bioactive Peptides (LPB)**, Faculty of Biochemi
 
 - Import `csv`, `tsv`, `txt`, `xls`, and `xlsx`
 - Map your own concentration/dose, response, and grouping columns
+- Build grouped `bar plots`, `boxplots`, and `line plots` for inhibitor and other bioassay datasets
+- Map separate bioassay `x`, `y`, `series`, `facet`, and optional annotation columns from the same uploaded file
+- Add manual or automatic significance letters to `bar plots`
 - Normalize responses either from the observed range or from manual 100% and 0% assay controls
 - Fit `4PL`, `5PL`, `3PL (Hill fixed = 1)`, `3PL (Bottom = 0)`, and `3PL (Top = 100)`
 - Use `Auto-detect`, `Increasing`, or `Decreasing` curve direction
 - Fit either `Group means` or `All observations`
 - Compare all models without bootstrap and get a suggested equation
 - Report IC50 or EC50 with `None`, `95% CI`, `+/- SD`, or `+/- SEM`
-- Export plots and results tables
+- Export curve plots, other plots, and results tables
 - Flag non-reportable IC50 values such as curves that never reach 50%
 - Show short fit-quality reasons such as `Top far above data` or `50% not reached`
 - Show an analysis summary window after fitting when some groups need review
@@ -126,6 +129,32 @@ Potency uncertainty is optional and uses bootstrap resampling.
 - The default y-axis includes `50` and `100` as reference values
 - You can hide the plot title and subtitle with checkboxes
 - Styling options, axis controls, and export settings are grouped in dropdown sections to keep the main panel shorter
+
+## Other plots module
+
+The app now includes a separate `Other Plots` tab for publication-style assay figures that do not require dose-response fitting.
+
+Typical uses:
+
+- grouped bar plots for compounds or peptides tested at several concentrations
+- boxplots for replicate distributions across treatments
+- line plots for time-course or concentration-course summaries
+
+Typical mapping for a figure like the attached hemolysis example:
+
+- `X column`: peptide or compound name
+- `Y column`: measured response such as `% hemolysis`
+- `Series / color column`: concentration
+- `Optional annotation column`: significance letters such as `a`, `b`, `c`
+
+Notes:
+
+- The other-plots module uses the same uploaded file as the curve-fitting workflow.
+- `Bar plot` and `Line plot` can summarize replicates with `Mean` or `Median`, plus `SEM`, `SD`, `95% CI`, `IQR`, or no error bars.
+- `Boxplot` shows the raw distribution and can still overlay replicate points and annotation labels.
+- `Bar plot` can use either a manual annotation column or automatic compact-letter labels from `ANOVA + Tukey HSD` or `Kruskal + pairwise Wilcoxon`.
+- Automatic letters should be used only when the rows being compared are independent biological observations rather than technical repeats from the same sample.
+- Styling and export settings are shared with the main curve plot module so the figures stay visually consistent.
 
 ## Troubleshooting
 

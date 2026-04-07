@@ -416,6 +416,650 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
   )
 }
 
+is_numericish_column <- function(x) {
+  if (is.numeric(x)) {
+    return(TRUE)
+  }
+
+  values <- trimws(as.character(x))
+  values <- values[!is.na(values) & nzchar(values)]
+  if (!length(values)) {
+    return(FALSE)
+  }
+
+  numeric_values <- suppressWarnings(as.numeric(values))
+  all(is.finite(numeric_values))
+}
+
+ordered_levels_from_values <- function(x) {
+  values <- trimws(as.character(x))
+  values <- values[!is.na(values) & nzchar(values)]
+
+  if (!length(values)) {
+    return(character())
+  }
+
+  if (is_numericish_column(values)) {
+    numeric_values <- suppressWarnings(as.numeric(values))
+    return(unique(values[order(numeric_values, values)]))
+  }
+
+  unique(values)
+}
+
+guess_bioassay_x_column <- function(data, plot_type = "Bar plot", dose_col = NULL, group_col = NULL) {
+  nm <- names(data)
+  if (!length(nm)) {
+    return("")
+  }
+
+  numeric_cols <- nm[vapply(data, is_numericish_column, logical(1))]
+  discrete_cols <- setdiff(nm, numeric_cols)
+
+  candidates <- if (identical(plot_type, "Line plot")) {
+    c(
+      dose_col,
+      guess_column(data, c("time", "hour", "day", "dose", "conc", "concentration"), NULL),
+      numeric_cols[1],
+      nm[1]
+    )
+  } else {
+    c(
+      if (!is.null(group_col) && !identical(group_col, "None")) group_col,
+      guess_column(data, c("group", "compound", "sample", "treatment", "peptide", "variant", "name"), NULL),
+      discrete_cols[1],
+      dose_col,
+      nm[1]
+    )
+  }
+
+  candidates <- unique(candidates[!is.na(candidates) & nzchar(candidates) & candidates %in% nm])
+  candidates[1] %||% nm[1]
+}
+
+guess_bioassay_series_column <- function(data, plot_type = "Bar plot", x_col = NULL, dose_col = NULL, group_col = NULL) {
+  nm <- names(data)
+  if (!length(nm)) {
+    return("None")
+  }
+
+  numeric_cols <- nm[vapply(data, is_numericish_column, logical(1))]
+  discrete_cols <- setdiff(nm, numeric_cols)
+
+  candidates <- if (identical(plot_type, "Line plot")) {
+    c(
+      if (!is.null(group_col) && !identical(group_col, "None") && !identical(group_col, x_col)) group_col,
+      guess_column(data, c("group", "compound", "sample", "treatment", "peptide", "variant"), NULL),
+      discrete_cols[1]
+    )
+  } else {
+    c(
+      if (!is.null(dose_col) && !identical(dose_col, x_col)) dose_col,
+      if (!is.null(group_col) && !identical(group_col, "None") && !identical(group_col, x_col)) group_col,
+      guess_column(data, c("dose", "conc", "concentration", "time", "hour", "day"), NULL),
+      discrete_cols[1]
+    )
+  }
+
+  candidates <- unique(candidates[!is.na(candidates) & nzchar(candidates) & candidates %in% nm])
+  candidates[1] %||% "None"
+}
+
+summarize_bioassay_dataset <- function(raw_df) {
+  split_rows <- split(
+    raw_df,
+    interaction(raw_df$facet, raw_df$series, raw_df$x, drop = TRUE, lex.order = TRUE)
+  )
+
+  summary_list <- lapply(split_rows, function(piece) {
+    values <- piece$y
+    sd_value <- if (length(values) > 1) stats::sd(values) else NA_real_
+    sem_value <- if (length(values) > 1) sd_value / sqrt(length(values)) else NA_real_
+    ci95_value <- if (length(values) > 1) stats::qt(0.975, df = length(values) - 1) * sem_value else NA_real_
+    label_values <- unique(piece$label[!is.na(piece$label) & nzchar(piece$label)])
+
+    data.frame(
+      facet = as.character(piece$facet[1]),
+      series = as.character(piece$series[1]),
+      x = as.character(piece$x[1]),
+      x_order = piece$x_order[1],
+      x_numeric = if (all(is.na(piece$x_numeric))) NA_real_ else piece$x_numeric[1],
+      n = length(values),
+      mean = mean(values),
+      median = stats::median(values),
+      sd = sd_value,
+      sem = sem_value,
+      ci95 = ci95_value,
+      q1 = as.numeric(stats::quantile(values, probs = 0.25, names = FALSE, na.rm = TRUE)),
+      q3 = as.numeric(stats::quantile(values, probs = 0.75, names = FALSE, na.rm = TRUE)),
+      min = min(values),
+      max = max(values),
+      label = if (length(label_values)) paste(label_values, collapse = ", ") else NA_character_,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  summary_df <- do.call(rbind, summary_list)
+  summary_df$x <- factor(summary_df$x, levels = levels(raw_df$x))
+  summary_df$series <- factor(summary_df$series, levels = levels(raw_df$series))
+  summary_df$facet <- factor(summary_df$facet, levels = levels(raw_df$facet))
+  summary_df[order(summary_df$facet, summary_df$series, summary_df$x_order), , drop = FALSE]
+}
+
+prepare_bioassay_dataset <- function(data, x_col, y_col, series_col = NULL, facet_col = NULL, label_col = NULL) {
+  if (!x_col %in% names(data) || !y_col %in% names(data)) {
+    stop("Choose both x and y columns for the other-plot module.")
+  }
+
+  x_source <- data[[x_col]]
+  y_source <- suppressWarnings(as.numeric(data[[y_col]]))
+  x_is_numeric <- is_numericish_column(x_source)
+  x_numeric <- if (x_is_numeric) suppressWarnings(as.numeric(as.character(x_source))) else rep(NA_real_, length(x_source))
+  x_values <- trimws(as.character(x_source))
+
+  series_values <- if (is.null(series_col) || identical(series_col, "None")) {
+    rep("All series", nrow(data))
+  } else {
+    trimws(as.character(data[[series_col]]))
+  }
+
+  facet_values <- if (is.null(facet_col) || identical(facet_col, "None")) {
+    rep("All data", nrow(data))
+  } else {
+    trimws(as.character(data[[facet_col]]))
+  }
+
+  label_values <- if (is.null(label_col) || identical(label_col, "None")) {
+    rep(NA_character_, nrow(data))
+  } else {
+    trimws(as.character(data[[label_col]]))
+  }
+
+  keep <- is.finite(y_source) &
+    !is.na(x_values) & nzchar(x_values) &
+    !is.na(series_values) & nzchar(series_values) &
+    !is.na(facet_values) & nzchar(facet_values)
+
+  if (x_is_numeric) {
+    keep <- keep & is.finite(x_numeric)
+  }
+
+  removed_rows <- sum(!keep)
+
+  raw_df <- data.frame(
+    x = x_values[keep],
+    x_numeric = x_numeric[keep],
+    y = y_source[keep],
+    series = series_values[keep],
+    facet = facet_values[keep],
+    label = label_values[keep],
+    stringsAsFactors = FALSE
+  )
+
+  if (!nrow(raw_df)) {
+    stop("No plottable rows remain after filtering. Check the other-plot x/y mappings and make sure the y column is numeric.")
+  }
+
+  raw_df$x <- factor(raw_df$x, levels = ordered_levels_from_values(raw_df$x))
+  raw_df$series <- factor(raw_df$series, levels = ordered_levels_from_values(raw_df$series))
+  raw_df$facet <- factor(raw_df$facet, levels = ordered_levels_from_values(raw_df$facet))
+  raw_df$x_order <- as.integer(raw_df$x)
+  raw_df <- raw_df[order(raw_df$facet, raw_df$series, raw_df$x_order), , drop = FALSE]
+  rownames(raw_df) <- NULL
+
+  notes <- c(
+    sprintf("Other-plot rows retained: %s", nrow(raw_df)),
+    sprintf("Rows removed from other plots: %s", removed_rows),
+    sprintf("Other-plot x-axis column: %s", x_col),
+    sprintf("Other-plot y-axis column: %s", y_col)
+  )
+
+  if (!is.null(series_col) && !identical(series_col, "None")) {
+    notes <- c(notes, sprintf("Series column: %s", series_col))
+  }
+
+  if (!is.null(facet_col) && !identical(facet_col, "None")) {
+    notes <- c(notes, sprintf("Facet column: %s", facet_col))
+  }
+
+  if (!is.null(label_col) && !identical(label_col, "None")) {
+    notes <- c(notes, sprintf("Annotation column: %s", label_col))
+  }
+
+  list(
+    raw = raw_df,
+    summary = summarize_bioassay_dataset(raw_df),
+    x_is_numeric = x_is_numeric,
+    x_label = x_col,
+    y_label = y_col,
+    series_label = if (!is.null(series_col) && !identical(series_col, "None")) series_col else NULL,
+    facet_label = if (!is.null(facet_col) && !identical(facet_col, "None")) facet_col else NULL,
+    label_label = if (!is.null(label_col) && !identical(label_col, "None")) label_col else NULL,
+    notes = notes
+  )
+}
+
+apply_bioassay_summary_preferences <- function(summary_df, statistic = "Mean", error_bars = "SEM") {
+  if (!nrow(summary_df)) {
+    return(summary_df)
+  }
+
+  summary_df$summary_y <- if (identical(statistic, "Median")) summary_df$median else summary_df$mean
+  summary_df$ymin <- NA_real_
+  summary_df$ymax <- NA_real_
+
+  if (identical(error_bars, "IQR")) {
+    summary_df$ymin <- summary_df$q1
+    summary_df$ymax <- summary_df$q3
+    return(summary_df)
+  }
+
+  spread <- switch(
+    error_bars,
+    "SD" = summary_df$sd,
+    "SEM" = summary_df$sem,
+    "95% CI" = summary_df$ci95,
+    rep(NA_real_, nrow(summary_df))
+  )
+
+  finite_spread <- is.finite(spread)
+  summary_df$ymin[finite_spread] <- summary_df$summary_y[finite_spread] - spread[finite_spread]
+  summary_df$ymax[finite_spread] <- summary_df$summary_y[finite_spread] + spread[finite_spread]
+  summary_df
+}
+
+row_max_finite <- function(...) {
+  values <- cbind(...)
+  apply(values, 1, function(piece) {
+    finite_values <- piece[is.finite(piece)]
+    if (!length(finite_values)) {
+      return(NA_real_)
+    }
+    max(finite_values)
+  })
+}
+
+bar_key_from_components <- function(facet, series, x) {
+  paste(as.character(facet), as.character(series), as.character(x), sep = "\r")
+}
+
+generate_letter_codes <- function(n) {
+  if (n <= 0) {
+    return(character())
+  }
+
+  alphabet <- letters
+  codes <- character(n)
+
+  for (i in seq_len(n)) {
+    value <- i
+    code <- ""
+
+    while (value > 0) {
+      remainder <- (value - 1) %% length(alphabet)
+      code <- paste0(alphabet[remainder + 1], code)
+      value <- (value - 1) %/% length(alphabet)
+    }
+
+    codes[i] <- code
+  }
+
+  codes
+}
+
+absorb_letter_matrix <- function(letter_matrix) {
+  if (!length(letter_matrix)) {
+    return(letter_matrix)
+  }
+
+  keep_cols <- colSums(letter_matrix) > 0
+  letter_matrix <- letter_matrix[, keep_cols, drop = FALSE]
+
+  if (!ncol(letter_matrix)) {
+    return(letter_matrix)
+  }
+
+  duplicate_cols <- duplicated(as.data.frame(t(letter_matrix)))
+  if (any(duplicate_cols)) {
+    letter_matrix <- letter_matrix[, !duplicate_cols, drop = FALSE]
+  }
+
+  repeat {
+    removed_any <- FALSE
+
+    if (ncol(letter_matrix) < 2) {
+      break
+    }
+
+    for (i in seq_len(ncol(letter_matrix))) {
+      if (removed_any) {
+        break
+      }
+
+      for (j in seq_len(ncol(letter_matrix))) {
+        if (i == j) {
+          next
+        }
+
+        subset_check <- all(!letter_matrix[, i] | letter_matrix[, j])
+        strictly_smaller <- any(letter_matrix[, j] & !letter_matrix[, i])
+
+        if (subset_check && strictly_smaller) {
+          letter_matrix <- letter_matrix[, -i, drop = FALSE]
+          removed_any <- TRUE
+          break
+        }
+      }
+    }
+
+    if (!removed_any) {
+      break
+    }
+  }
+
+  letter_matrix
+}
+
+compact_letters_from_significance <- function(significant_matrix, group_scores = NULL) {
+  group_names <- rownames(significant_matrix)
+  n_groups <- length(group_names)
+
+  if (!n_groups) {
+    return(setNames(character(), character()))
+  }
+
+  if (n_groups == 1) {
+    return(setNames("a", group_names))
+  }
+
+  letter_matrix <- matrix(
+    TRUE,
+    nrow = n_groups,
+    ncol = 1,
+    dimnames = list(group_names, NULL)
+  )
+
+  sig_pairs <- which(significant_matrix & upper.tri(significant_matrix), arr.ind = TRUE)
+
+  if (nrow(sig_pairs) > 0) {
+    for (pair_index in seq_len(nrow(sig_pairs))) {
+      i <- sig_pairs[pair_index, "row"]
+      j <- sig_pairs[pair_index, "col"]
+      split_cols <- which(letter_matrix[i, ] & letter_matrix[j, ])
+
+      if (!length(split_cols)) {
+        next
+      }
+
+      for (col_index in rev(split_cols)) {
+        col_i <- letter_matrix[, col_index]
+        col_j <- letter_matrix[, col_index]
+        col_i[i] <- FALSE
+        col_j[j] <- FALSE
+        letter_matrix[, col_index] <- col_i
+        letter_matrix <- cbind(letter_matrix, col_j)
+      }
+
+      letter_matrix <- absorb_letter_matrix(letter_matrix)
+    }
+  }
+
+  if (!is.null(group_scores) && ncol(letter_matrix) > 1) {
+    col_scores <- vapply(seq_len(ncol(letter_matrix)), function(idx) {
+      included_groups <- names(group_scores)[letter_matrix[, idx]]
+      if (!length(included_groups)) {
+        return(-Inf)
+      }
+      max(group_scores[included_groups], na.rm = TRUE)
+    }, numeric(1))
+
+    letter_matrix <- letter_matrix[, order(col_scores, decreasing = TRUE), drop = FALSE]
+  }
+
+  letter_codes <- generate_letter_codes(ncol(letter_matrix))
+  group_letters <- vapply(seq_len(nrow(letter_matrix)), function(idx) {
+    paste0(letter_codes[letter_matrix[idx, ]], collapse = "")
+  }, character(1))
+
+  group_letters[group_letters == ""] <- NA_character_
+  setNames(group_letters, group_names)
+}
+
+symmetrize_pairwise_p <- function(lower_matrix, group_levels) {
+  p_matrix <- matrix(
+    NA_real_,
+    nrow = length(group_levels),
+    ncol = length(group_levels),
+    dimnames = list(group_levels, group_levels)
+  )
+  diag(p_matrix) <- 1
+
+  if (length(lower_matrix)) {
+    for (row_name in rownames(lower_matrix)) {
+      for (col_name in colnames(lower_matrix)) {
+        p_value <- lower_matrix[row_name, col_name]
+        if (!is.finite(p_value)) {
+          next
+        }
+        p_matrix[row_name, col_name] <- p_value
+        p_matrix[col_name, row_name] <- p_value
+      }
+    }
+  }
+
+  p_matrix
+}
+
+compute_pairwise_p_matrix <- function(values, groups, method_name) {
+  group_factor <- factor(groups)
+  group_levels <- levels(group_factor)
+
+  if (length(group_levels) < 2) {
+    stop("At least two groups are required.")
+  }
+
+  if (identical(method_name, "ANOVA + Tukey HSD")) {
+    if (length(values) <= length(group_levels)) {
+      stop("ANOVA + Tukey HSD needs at least one residual degree of freedom.")
+    }
+
+    fit <- stats::aov(values ~ group_factor)
+    tukey <- stats::TukeyHSD(fit)
+    tukey_table <- tukey$group_factor
+
+    if (is.null(tukey_table) || !nrow(tukey_table)) {
+      stop("Tukey HSD did not return pairwise comparisons.")
+    }
+
+    p_matrix <- matrix(
+      NA_real_,
+      nrow = length(group_levels),
+      ncol = length(group_levels),
+      dimnames = list(group_levels, group_levels)
+    )
+    diag(p_matrix) <- 1
+
+    for (comparison_name in rownames(tukey_table)) {
+      comparison_parts <- strsplit(comparison_name, "-", fixed = TRUE)[[1]]
+      if (length(comparison_parts) != 2) {
+        next
+      }
+
+      group_high <- comparison_parts[1]
+      group_low <- comparison_parts[2]
+      p_value <- tukey_table[comparison_name, "p adj"]
+
+      p_matrix[group_high, group_low] <- p_value
+      p_matrix[group_low, group_high] <- p_value
+    }
+
+    return(p_matrix)
+  }
+
+  if (identical(method_name, "Kruskal + pairwise Wilcoxon")) {
+    pairwise <- suppressWarnings(
+      stats::pairwise.wilcox.test(
+        x = values,
+        g = group_factor,
+        p.adjust.method = "holm",
+        exact = FALSE
+      )
+    )
+
+    if (is.null(pairwise$p.value)) {
+      stop("Pairwise Wilcoxon did not return a p-value matrix.")
+    }
+
+    return(symmetrize_pairwise_p(pairwise$p.value, group_levels))
+  }
+
+  stop("Unknown bar-plot letter method.")
+}
+
+compute_auto_bioassay_letters <- function(prepared, method_name, scope_name, alpha = 0.05) {
+  raw_df <- prepared$raw
+  summary_df <- prepared$summary
+
+  if (!nrow(raw_df) || !nrow(summary_df)) {
+    return(list(labels = setNames(character(), character()), notes = "Automatic letters could not be computed because no rows were available."))
+  }
+
+  work_df <- raw_df
+  work_df$bar_key <- bar_key_from_components(work_df$facet, work_df$series, work_df$x)
+
+  if (identical(scope_name, "Across all bars in each facet")) {
+    work_df$family_id <- as.character(work_df$facet)
+    work_df$group_value <- work_df$bar_key
+  } else if (identical(scope_name, "Within each series in each facet")) {
+    work_df$family_id <- paste(as.character(work_df$facet), as.character(work_df$series), sep = "\r")
+    work_df$group_value <- as.character(work_df$x)
+  } else if (identical(scope_name, "Within each x group in each facet")) {
+    work_df$family_id <- paste(as.character(work_df$facet), as.character(work_df$x), sep = "\r")
+    work_df$group_value <- as.character(work_df$series)
+  } else {
+    stop("Unknown bar-plot comparison scope.")
+  }
+
+  label_map <- setNames(rep(NA_character_, nrow(summary_df)), bar_key_from_components(summary_df$facet, summary_df$series, summary_df$x))
+  family_pieces <- split(work_df, work_df$family_id)
+  analyzed_families <- 0
+  skipped_messages <- character()
+
+  for (family_name in names(family_pieces)) {
+    piece <- family_pieces[[family_name]]
+    group_values <- unique(as.character(piece$group_value))
+
+    if (length(group_values) < 2) {
+      skipped_messages <- c(skipped_messages, sprintf("Skipped one comparison family because it had fewer than two groups."))
+      next
+    }
+
+    group_lookup <- setNames(paste0("g", seq_along(group_values)), group_values)
+    reverse_lookup <- setNames(names(group_lookup), group_lookup)
+    piece$group_id <- factor(group_lookup[as.character(piece$group_value)], levels = unname(group_lookup))
+
+    p_matrix <- try(
+      compute_pairwise_p_matrix(piece$y, piece$group_id, method_name),
+      silent = TRUE
+    )
+
+    if (inherits(p_matrix, "try-error")) {
+      skipped_messages <- c(
+        skipped_messages,
+        sprintf("Skipped one comparison family because %s.", conditionMessage(attr(p_matrix, "condition") %||% simpleError("the test failed")))
+      )
+      next
+    }
+
+    off_diagonal <- p_matrix[row(p_matrix) != col(p_matrix)]
+    if (!length(off_diagonal) || !any(is.finite(off_diagonal))) {
+      skipped_messages <- c(skipped_messages, "Skipped one comparison family because no pairwise p-values were available.")
+      next
+    }
+
+    if (any(is.na(off_diagonal))) {
+      skipped_messages <- c(skipped_messages, "Skipped one comparison family because some pairwise comparisons returned missing p-values.")
+      next
+    }
+
+    group_scores <- tapply(piece$y, piece$group_id, mean, na.rm = TRUE)
+    significant_matrix <- p_matrix < alpha
+    diag(significant_matrix) <- FALSE
+    letters_by_id <- compact_letters_from_significance(significant_matrix, group_scores = group_scores)
+    letters_by_group <- setNames(letters_by_id[names(reverse_lookup)], reverse_lookup)
+
+    piece_summary <- summary_df[bar_key_from_components(summary_df$facet, summary_df$series, summary_df$x) %in% unique(piece$bar_key), , drop = FALSE]
+    piece_keys <- bar_key_from_components(piece_summary$facet, piece_summary$series, piece_summary$x)
+
+    if (identical(scope_name, "Across all bars in each facet")) {
+      label_map[piece_keys] <- letters_by_group[piece_keys]
+    } else if (identical(scope_name, "Within each series in each facet")) {
+      label_map[piece_keys] <- letters_by_group[as.character(piece_summary$x)]
+    } else {
+      label_map[piece_keys] <- letters_by_group[as.character(piece_summary$series)]
+    }
+
+    analyzed_families <- analyzed_families + 1
+  }
+
+  note_parts <- c(
+    sprintf(
+      "Automatic letters: %s family/families analyzed using %s at alpha = %s (%s).",
+      analyzed_families,
+      method_name,
+      format_decimal_text(alpha, 3),
+      scope_name
+    ),
+    unique(skipped_messages)
+  )
+
+  list(
+    labels = label_map,
+    notes = note_parts[nzchar(note_parts)]
+  )
+}
+
+resolve_bioassay_label_data <- function(prepared, summary_df, input) {
+  output_df <- summary_df
+  output_df$display_label <- NA_character_
+  output_df$label_source <- "None"
+  notes <- character()
+  label_mode <- input$bioassay_label_mode %||% "None"
+
+  if (identical(label_mode, "Annotation column")) {
+    if (is.null(prepared$label_label)) {
+      notes <- c(notes, "Annotation labels are enabled, but no annotation column is selected.")
+    } else {
+      output_df$display_label <- output_df$label
+      output_df$label_source[!is.na(output_df$display_label) & nzchar(output_df$display_label)] <- "Annotation column"
+    }
+  } else if (identical(label_mode, "Auto significance letters (bar plot)")) {
+    if (!identical(input$bioassay_plot_type, "Bar plot")) {
+      notes <- c(notes, "Automatic significance letters are currently available only for bar plots.")
+    } else {
+      auto_letters <- compute_auto_bioassay_letters(
+        prepared = prepared,
+        method_name = input$bioassay_letters_method %||% "ANOVA + Tukey HSD",
+        scope_name = input$bioassay_letters_scope %||% "Across all bars in each facet",
+        alpha = input$bioassay_letters_alpha %||% 0.05
+      )
+
+      bar_keys <- bar_key_from_components(output_df$facet, output_df$series, output_df$x)
+      output_df$display_label <- auto_letters$labels[bar_keys]
+      output_df$label_source[!is.na(output_df$display_label) & nzchar(output_df$display_label)] <- "Auto significance letters"
+      notes <- c(notes, auto_letters$notes)
+    }
+  }
+
+  label_rows <- output_df[!is.na(output_df$display_label) & nzchar(output_df$display_label), , drop = FALSE]
+
+  list(
+    summary = output_df,
+    label_rows = label_rows,
+    notes = notes[nzchar(notes)]
+  )
+}
+
 predict_curve <- function(dose, params, model, direction) {
   bottom <- params$bottom
   top <- params$top
@@ -2040,6 +2684,472 @@ build_plot <- function(prepared, fit_data, input) {
   p
 }
 
+build_bioassay_plot <- function(prepared, input) {
+  raw_df <- prepared$raw
+  summary_df <- apply_bioassay_summary_preferences(
+    prepared$summary,
+    statistic = input$bioassay_summary_stat,
+    error_bars = input$bioassay_error_bars
+  )
+  label_info <- resolve_bioassay_label_data(prepared, summary_df, input)
+  summary_df <- label_info$summary
+
+  has_series <- !is.null(prepared$series_label) &&
+    length(unique(as.character(raw_df$series))) > 1
+  series_levels <- levels(raw_df$series)
+  palette_values <- publication_palette(length(series_levels), input$palette_name)
+  names(palette_values) <- series_levels
+  legend_name <- if (has_series && isTRUE(input$show_legend_title)) prepared$series_label else NULL
+  plot_type <- input$bioassay_plot_type %||% "Bar plot"
+
+  plot_title <- trimws(input$bioassay_title)
+  if (!nzchar(plot_title)) {
+    plot_title <- "Other response plot"
+  }
+  if (!isTRUE(input$show_bioassay_title)) {
+    plot_title <- NULL
+  }
+
+  x_label <- if (nzchar(trimws(input$bioassay_x_axis_title))) {
+    trimws(input$bioassay_x_axis_title)
+  } else {
+    prepared$x_label
+  }
+
+  y_label <- if (nzchar(trimws(input$bioassay_y_axis_title))) {
+    trimws(input$bioassay_y_axis_title)
+  } else {
+    prepared$y_label
+  }
+
+  label_rows <- label_info$label_rows
+
+  y_range <- range(c(raw_df$y, summary_df$ymax, summary_df$summary_y), na.rm = TRUE)
+  y_span <- diff(y_range)
+  if (!is.finite(y_span) || y_span <= 0) {
+    y_span <- max(abs(y_range[is.finite(y_range)]), 1)
+  }
+  label_offset <- y_span * 0.06
+  summary_df$label_y <- row_max_finite(summary_df$summary_y, summary_df$ymax, summary_df$max) + label_offset
+  label_rows$label_y <- row_max_finite(label_rows$summary_y, label_rows$ymax, label_rows$max) + label_offset
+  show_label_rows <- nrow(label_rows) > 0
+
+  p <- ggplot()
+
+  if (identical(plot_type, "Bar plot")) {
+    bar_position <- if (has_series) ggplot2::position_dodge(width = 0.78) else "identity"
+
+    if (has_series) {
+      p <- p + geom_col(
+        data = summary_df,
+        aes(x = x, y = summary_y, fill = series),
+        width = 0.72,
+        position = bar_position,
+        colour = "#111111",
+        size = 0.25
+      )
+    } else {
+      p <- p + geom_col(
+        data = summary_df,
+        aes(x = x, y = summary_y),
+        fill = palette_values[1],
+        width = 0.72,
+        colour = "#111111",
+        size = 0.25,
+        show.legend = FALSE
+      )
+    }
+
+    error_df <- summary_df[is.finite(summary_df$ymin) & is.finite(summary_df$ymax), , drop = FALSE]
+    if (nrow(error_df) > 0) {
+      if (has_series) {
+        p <- p + geom_errorbar(
+          data = error_df,
+          aes(x = x, ymin = ymin, ymax = ymax, colour = series, group = series),
+          position = bar_position,
+          width = 0.16,
+          size = max(0.35, input$line_width * 0.75),
+          show.legend = FALSE
+        )
+      } else {
+        p <- p + geom_errorbar(
+          data = error_df,
+          aes(x = x, ymin = ymin, ymax = ymax),
+          colour = "#111111",
+          position = bar_position,
+          width = 0.16,
+          size = max(0.35, input$line_width * 0.75),
+          show.legend = FALSE
+        )
+      }
+    }
+
+    if (isTRUE(input$bioassay_show_points)) {
+      if (has_series) {
+        p <- p + geom_point(
+          data = raw_df,
+          aes(x = x, y = y, colour = series),
+          position = ggplot2::position_jitterdodge(jitter.width = 0.12, dodge.width = 0.78),
+          alpha = 0.62,
+          size = input$point_size * 0.72,
+          show.legend = FALSE
+        )
+      } else {
+        p <- p + geom_point(
+          data = raw_df,
+          aes(x = x, y = y),
+          position = ggplot2::position_jitter(width = 0.12, height = 0),
+          alpha = 0.62,
+          size = input$point_size * 0.72,
+          colour = "#111111",
+          show.legend = FALSE
+        )
+      }
+    }
+
+    if (show_label_rows) {
+      if (has_series) {
+        p <- p + geom_text(
+          data = label_rows,
+          aes(x = x, y = label_y, label = display_label, group = series),
+          position = bar_position,
+          vjust = 0,
+          size = input$bioassay_label_size,
+          fontface = "bold",
+          show.legend = FALSE
+        )
+      } else {
+        p <- p + geom_text(
+          data = label_rows,
+          aes(x = x, y = label_y, label = display_label),
+          vjust = 0,
+          size = input$bioassay_label_size,
+          fontface = "bold",
+          show.legend = FALSE
+        )
+      }
+    }
+  } else if (identical(plot_type, "Boxplot")) {
+    box_position <- if (has_series) ggplot2::position_dodge2(width = 0.78, preserve = "single") else "identity"
+
+    if (has_series) {
+      p <- p + geom_boxplot(
+        data = raw_df,
+        aes(x = x, y = y, fill = series),
+        width = 0.72,
+        position = box_position,
+        outlier.shape = NA,
+        alpha = 0.8,
+        size = 0.35
+      )
+    } else {
+      p <- p + geom_boxplot(
+        data = raw_df,
+        aes(x = x, y = y),
+        fill = palette_values[1],
+        width = 0.72,
+        position = box_position,
+        outlier.shape = NA,
+        alpha = 0.8,
+        size = 0.35,
+        show.legend = FALSE
+      )
+    }
+
+    if (isTRUE(input$bioassay_show_points)) {
+      if (has_series) {
+        p <- p + geom_point(
+          data = raw_df,
+          aes(x = x, y = y, colour = series),
+          position = ggplot2::position_jitterdodge(jitter.width = 0.14, dodge.width = 0.78),
+          alpha = 0.55,
+          size = input$point_size * 0.7,
+          show.legend = FALSE
+        )
+      } else {
+        p <- p + geom_point(
+          data = raw_df,
+          aes(x = x, y = y),
+          position = ggplot2::position_jitter(width = 0.14, height = 0),
+          alpha = 0.55,
+          size = input$point_size * 0.7,
+          colour = "#111111",
+          show.legend = FALSE
+        )
+      }
+    }
+
+    if (show_label_rows) {
+      if (has_series) {
+        p <- p + geom_text(
+          data = label_rows,
+          aes(x = x, y = label_y, label = display_label, group = series),
+          position = ggplot2::position_dodge(width = 0.78),
+          vjust = 0,
+          size = input$bioassay_label_size,
+          fontface = "bold",
+          show.legend = FALSE
+        )
+      } else {
+        p <- p + geom_text(
+          data = label_rows,
+          aes(x = x, y = label_y, label = display_label),
+          vjust = 0,
+          size = input$bioassay_label_size,
+          fontface = "bold",
+          show.legend = FALSE
+        )
+      }
+    }
+  } else {
+    line_df <- if (prepared$x_is_numeric) {
+      summary_df[order(summary_df$facet, summary_df$series, summary_df$x_numeric), , drop = FALSE]
+    } else {
+      summary_df[order(summary_df$facet, summary_df$series, summary_df$x_order), , drop = FALSE]
+    }
+    error_df <- line_df[is.finite(line_df$ymin) & is.finite(line_df$ymax), , drop = FALSE]
+    error_width <- if (prepared$x_is_numeric) {
+      x_range <- diff(range(raw_df$x_numeric, na.rm = TRUE))
+      if (!is.finite(x_range) || x_range <= 0) 0.08 else x_range / 60
+    } else {
+      0.12
+    }
+
+    if (prepared$x_is_numeric) {
+      if (has_series) {
+        p <- p +
+          geom_line(
+            data = line_df,
+            aes(x = x_numeric, y = summary_y, colour = series, group = series),
+            size = input$line_width
+          ) +
+          geom_point(
+            data = line_df,
+            aes(x = x_numeric, y = summary_y, colour = series),
+            size = input$point_size
+          )
+      } else {
+        p <- p +
+          geom_line(
+            data = line_df,
+            aes(x = x_numeric, y = summary_y, group = 1),
+            size = input$line_width,
+            colour = palette_values[1]
+          ) +
+          geom_point(
+            data = line_df,
+            aes(x = x_numeric, y = summary_y),
+            size = input$point_size,
+            colour = palette_values[1]
+          )
+      }
+
+      if (nrow(error_df) > 0) {
+        if (has_series) {
+          p <- p + geom_errorbar(
+            data = error_df,
+            aes(x = x_numeric, ymin = ymin, ymax = ymax, colour = series),
+            width = error_width,
+            size = max(0.35, input$line_width * 0.7),
+            show.legend = FALSE
+          )
+        } else {
+          p <- p + geom_errorbar(
+            data = error_df,
+            aes(x = x_numeric, ymin = ymin, ymax = ymax),
+            width = error_width,
+            size = max(0.35, input$line_width * 0.7),
+            colour = palette_values[1],
+            show.legend = FALSE
+          )
+        }
+      }
+
+      if (isTRUE(input$bioassay_show_points)) {
+        if (has_series) {
+          p <- p + geom_point(
+            data = raw_df,
+            aes(x = x_numeric, y = y, colour = series),
+            alpha = 0.45,
+            size = input$point_size * 0.72,
+            show.legend = FALSE
+          )
+        } else {
+          p <- p + geom_point(
+            data = raw_df,
+            aes(x = x_numeric, y = y),
+            alpha = 0.45,
+            size = input$point_size * 0.72,
+            colour = "#111111",
+            show.legend = FALSE
+          )
+        }
+      }
+
+      if (show_label_rows) {
+        if (has_series) {
+          p <- p + geom_text(
+            data = label_rows,
+            aes(x = x_numeric, y = label_y, label = display_label),
+            vjust = 0,
+            size = input$bioassay_label_size,
+            fontface = "bold",
+            show.legend = FALSE
+          )
+        } else {
+          p <- p + geom_text(
+            data = label_rows,
+            aes(x = x_numeric, y = label_y, label = display_label),
+            vjust = 0,
+            size = input$bioassay_label_size,
+            fontface = "bold",
+            show.legend = FALSE
+          )
+        }
+      }
+    } else {
+      if (has_series) {
+        p <- p +
+          geom_line(
+            data = line_df,
+            aes(x = x, y = summary_y, colour = series, group = series),
+            size = input$line_width
+          ) +
+          geom_point(
+            data = line_df,
+            aes(x = x, y = summary_y, colour = series),
+            size = input$point_size
+          )
+      } else {
+        p <- p +
+          geom_line(
+            data = line_df,
+            aes(x = x, y = summary_y, group = 1),
+            size = input$line_width,
+            colour = palette_values[1]
+          ) +
+          geom_point(
+            data = line_df,
+            aes(x = x, y = summary_y),
+            size = input$point_size,
+            colour = palette_values[1]
+          )
+      }
+
+      if (nrow(error_df) > 0) {
+        if (has_series) {
+          p <- p + geom_errorbar(
+            data = error_df,
+            aes(x = x, ymin = ymin, ymax = ymax, colour = series, group = series),
+            width = error_width,
+            size = max(0.35, input$line_width * 0.7),
+            show.legend = FALSE
+          )
+        } else {
+          p <- p + geom_errorbar(
+            data = error_df,
+            aes(x = x, ymin = ymin, ymax = ymax, group = 1),
+            width = error_width,
+            size = max(0.35, input$line_width * 0.7),
+            colour = palette_values[1],
+            show.legend = FALSE
+          )
+        }
+      }
+
+      if (isTRUE(input$bioassay_show_points)) {
+        if (has_series) {
+          p <- p + geom_point(
+            data = raw_df,
+            aes(x = x, y = y, colour = series),
+            alpha = 0.45,
+            size = input$point_size * 0.72,
+            position = ggplot2::position_jitter(width = 0.08, height = 0),
+            show.legend = FALSE
+          )
+        } else {
+          p <- p + geom_point(
+            data = raw_df,
+            aes(x = x, y = y),
+            alpha = 0.45,
+            size = input$point_size * 0.72,
+            position = ggplot2::position_jitter(width = 0.08, height = 0),
+            colour = "#111111",
+            show.legend = FALSE
+          )
+        }
+      }
+
+      if (show_label_rows) {
+        if (has_series) {
+          p <- p + geom_text(
+            data = label_rows,
+            aes(x = x, y = label_y, label = display_label),
+            vjust = 0,
+            size = input$bioassay_label_size,
+            fontface = "bold",
+            show.legend = FALSE
+          )
+        } else {
+          p <- p + geom_text(
+            data = label_rows,
+            aes(x = x, y = label_y, label = display_label),
+            vjust = 0,
+            size = input$bioassay_label_size,
+            fontface = "bold",
+            show.legend = FALSE
+          )
+        }
+      }
+    }
+  }
+
+  if (has_series) {
+    p <- p +
+      scale_colour_manual(values = palette_values, name = legend_name) +
+      scale_fill_manual(values = palette_values, name = legend_name)
+  }
+
+  p <- p +
+    labs(
+      title = plot_title,
+      x = x_label,
+      y = y_label
+    ) +
+    publication_theme(
+      style_name = input$plot_style,
+      base_size = input$base_font_size,
+      legend_position = if (has_series) input$legend_position else "None",
+      background_fill = input$background_fill,
+      grid_mode = input$plot_grid_mode
+    ) +
+    scale_y_continuous(
+      labels = format_axis_labels,
+      expand = ggplot2::expansion(mult = c(0.02, if (show_label_rows) 0.16 else 0.08))
+    )
+
+  if (identical(plot_type, "Line plot") && prepared$x_is_numeric) {
+    if (isTRUE(input$bioassay_use_log10_x) && all(raw_df$x_numeric > 0, na.rm = TRUE)) {
+      p <- p + scale_x_log10(labels = format_axis_labels)
+    } else {
+      p <- p + scale_x_continuous(labels = format_axis_labels)
+    }
+  } else {
+    p <- p + scale_x_discrete(drop = FALSE)
+  }
+
+  x_levels <- levels(raw_df$x)
+  if (length(x_levels) > 4 || any(nchar(x_levels) > 7)) {
+    p <- p + theme(axis.text.x = element_text(angle = 25, hjust = 1))
+  }
+
+  if (length(levels(raw_df$facet)) > 1) {
+    p <- p + facet_wrap(~facet)
+  }
+
+  p
+}
+
 app_theme <- bs_theme(
   version = 5,
   bg = "#f7f4ef",
@@ -2323,7 +3433,7 @@ ui <- fluidPage(
         ),
         tags$details(
           class = "well",
-          tags$summary("Plot quick controls"),
+          tags$summary("Curve plot quick controls"),
           br(),
           textInput("plot_title", "Plot title", value = "Dose-response curve fit"),
           checkboxInput("show_plot_title", "Show title", value = TRUE),
@@ -2393,7 +3503,69 @@ ui <- fluidPage(
         ),
         tags$details(
           class = "well",
-          tags$summary("Axis breaks and limits"),
+          tags$summary("Other plots module"),
+          br(),
+          selectInput(
+            "bioassay_plot_type",
+            "Other plot type",
+            choices = c("Bar plot", "Boxplot", "Line plot"),
+            selected = "Bar plot"
+          ),
+          uiOutput("bioassay_mapping_ui"),
+          conditionalPanel(
+            condition = "input.bioassay_plot_type !== 'Boxplot'",
+            selectInput(
+              "bioassay_summary_stat",
+              "Summary value",
+              choices = c("Mean", "Median"),
+              selected = "Mean"
+            ),
+            selectInput(
+              "bioassay_error_bars",
+              "Error bars",
+              choices = c("SEM", "SD", "95% CI", "IQR", "None"),
+              selected = "SEM"
+            )
+          ),
+          checkboxInput("bioassay_show_points", "Overlay raw points", value = TRUE),
+          selectInput(
+            "bioassay_label_mode",
+            "Label mode",
+            choices = c("None", "Annotation column", "Auto significance letters (bar plot)"),
+            selected = "None"
+          ),
+          conditionalPanel(
+            condition = "input.bioassay_label_mode === 'Auto significance letters (bar plot)' && input.bioassay_plot_type === 'Bar plot'",
+            selectInput(
+              "bioassay_letters_method",
+              "Letter test",
+              choices = c("ANOVA + Tukey HSD", "Kruskal + pairwise Wilcoxon"),
+              selected = "ANOVA + Tukey HSD"
+            ),
+            selectInput(
+              "bioassay_letters_scope",
+              "Compare bars",
+              choices = c(
+                "Across all bars in each facet",
+                "Within each series in each facet",
+                "Within each x group in each facet"
+              ),
+              selected = "Within each x group in each facet"
+            ),
+            numericInput("bioassay_letters_alpha", "Letter alpha", value = 0.05, min = 0.001, max = 0.2, step = 0.005),
+            helpText("Letters are calculated from the raw replicate rows. For grouped bar figures like peptide x concentration, the usual choice is 'Within each x group in each facet' so concentrations are compared within each peptide. Use this only when the replicates are independent biological observations, not only technical repeats.")
+          ),
+          checkboxInput("bioassay_use_log10_x", "Use log10 x-axis when the selected x column is numeric", value = FALSE),
+          numericInput("bioassay_label_size", "Letter / annotation size", value = 5, min = 2, max = 12, step = 0.25),
+          textInput("bioassay_title", "Other plot title", value = "Other response plot"),
+          checkboxInput("show_bioassay_title", "Show other-plot title", value = TRUE),
+          textInput("bioassay_x_axis_title", "Other plot x-axis title", value = ""),
+          textInput("bioassay_y_axis_title", "Other plot y-axis title", value = ""),
+          helpText("For inhibitor-style grouped bars like the example image, map X = compound or peptide, Y = response, Series = concentration, and either choose an annotation column or turn on automatic significance letters.")
+        ),
+        tags$details(
+          class = "well",
+          tags$summary("Curve plot axis breaks and limits"),
           br(),
           textInput("x_breaks", "Custom x breaks", value = "", placeholder = "e.g. 1.56, 6.25, 25, 100, 400"),
           textInput("y_breaks", "Custom y breaks", value = "", placeholder = "e.g. 0, 25, 50, 75, 100"),
@@ -2402,7 +3574,7 @@ ui <- fluidPage(
         ),
         tags$details(
           class = "well",
-          tags$summary("Export settings"),
+          tags$summary("Export settings (all plots)"),
           br(),
           textInput("export_filename", "Export file name", value = "dose_response_curve"),
           selectInput("export_format", "Export format", choices = c("PNG", "TIFF", "PDF", "SVG"), selected = "PNG"),
@@ -2448,7 +3620,19 @@ ui <- fluidPage(
             DTOutput("raw_data_table"),
             br(),
             h4("Prepared summary"),
-            DTOutput("summary_data_table")
+            DTOutput("summary_data_table"),
+            br(),
+            h4("Other-plots summary"),
+            DTOutput("bioassay_summary_table")
+          ),
+          tabPanel(
+            "Other Plots",
+            br(),
+            div(class = "note-block", textOutput("bioassay_notes")),
+            plotOutput("bioassay_plot", height = "620px"),
+            br(),
+            downloadButton("download_bioassay_plot", "Download other plot"),
+            downloadButton("download_bioassay_summary", "Download other-plot summary CSV")
           ),
           tabPanel(
             "Instructions",
@@ -2460,6 +3644,13 @@ ui <- fluidPage(
             tags$p("4. Choose a model, or turn on 'Compare all models first (no bootstrap)' to get a fast suggestion."),
             tags$p("5. Click Run analysis."),
             tags$p("6. For final reporting, turn on IC50 uncertainty only after you are happy with the model and plot."),
+            br(),
+            h4("Other plots module"),
+            tags$p("Use the Other Plots tab when you want assay-style figures without fitting a sigmoid model."),
+            tags$p("Typical mappings are X = peptide or treatment, Y = response, Series = concentration or condition, and Optional annotation = significance letters or compact letter displays."),
+            tags$p("Bar plot is useful for grouped inhibitor summaries, Boxplot is useful for replicate distributions, and Line plot is useful for time-course or concentration-course summaries."),
+            tags$p("The other-plots module uses the same uploaded file, styling palette, and export settings as the curve plot tab, but it has its own x/y/series mapping and summary controls."),
+            tags$p("Bar plots can now add automatic significance letters from ANOVA plus Tukey HSD or Kruskal plus pairwise Wilcoxon comparisons. Use these letters only when your rows are independent biological replicates, not only technical repeats."),
             br(),
             h4("Recommended workflow"),
             tags$p("Start with Group means and IC50 uncertainty = None."),
@@ -2474,6 +3665,7 @@ ui <- fluidPage(
             tags$p("Concentration values must be greater than zero if you want a log-scale x axis or a standard IC50 fit."),
             tags$p("The app does not assume a fixed unit. You can use nM, uM, ug/mL, mg/mL, or any other unit as long as the concentration column is numeric, then write the exact unit in the x-axis title."),
             tags$p("If you want GraphPad-like absolute normalization, choose 'Normalize using manual 0% and 100% controls' and enter the assay control responses used to define 100% and 0%."),
+            tags$p("For the other-plots module, the x column can be categorical or numeric, the y column should be numeric, and the optional annotation column can contain letters or short labels to place above bars, boxes, or line points."),
             br(),
             h4("Choosing a model"),
             tags$p("4PL is a good general starting point when both lower and upper plateaus are visible."),
@@ -2646,6 +3838,117 @@ server <- function(input, output, session) {
     )
   })
 
+  output$bioassay_mapping_ui <- renderUI({
+    df <- current_data()
+    nm <- names(df)
+    req(length(nm) > 0)
+
+    numeric_cols <- nm[vapply(df, is_numericish_column, logical(1))]
+    y_choices <- if (length(numeric_cols)) numeric_cols else nm
+    plot_type <- input$bioassay_plot_type %||% "Bar plot"
+
+    default_x <- guess_bioassay_x_column(
+      data = df,
+      plot_type = plot_type,
+      dose_col = input$dose_col %||% NULL,
+      group_col = input$group_col %||% NULL
+    )
+    default_y <- input$response_col %||%
+      guess_column(df, c("response", "signal", "viability", "inhibition", "activity", "effect", "hemol"), y_choices[1] %||% nm[1])
+    default_series <- guess_bioassay_series_column(
+      data = df,
+      plot_type = plot_type,
+      x_col = default_x,
+      dose_col = input$dose_col %||% NULL,
+      group_col = input$group_col %||% NULL
+    )
+    selected_x <- isolate(input$bioassay_x_col)
+    if (is.null(selected_x) || !selected_x %in% nm) {
+      selected_x <- default_x
+    }
+
+    selected_y <- isolate(input$bioassay_y_col)
+    if (is.null(selected_y) || !selected_y %in% y_choices) {
+      selected_y <- if (!is.null(default_y) && default_y %in% y_choices) default_y else y_choices[1]
+    }
+
+    selected_series <- isolate(input$bioassay_series_col)
+    if (is.null(selected_series) || (!identical(selected_series, "None") && !selected_series %in% nm)) {
+      selected_series <- if (!is.null(default_series) && default_series %in% nm) default_series else "None"
+    }
+
+    selected_facet <- isolate(input$bioassay_facet_col)
+    if (is.null(selected_facet) || (!identical(selected_facet, "None") && !selected_facet %in% nm)) {
+      selected_facet <- "None"
+    }
+
+    selected_label <- isolate(input$bioassay_label_col)
+    if (is.null(selected_label) || (!identical(selected_label, "None") && !selected_label %in% nm)) {
+      selected_label <- "None"
+    }
+
+    tagList(
+      h4("Other plot column mapping"),
+      selectInput(
+        "bioassay_x_col",
+        "X column",
+        choices = nm,
+        selected = selected_x
+      ),
+      selectInput(
+        "bioassay_y_col",
+        "Y column",
+        choices = y_choices,
+        selected = selected_y
+      ),
+      selectInput(
+        "bioassay_series_col",
+        "Series / color column",
+        choices = c("None", nm),
+        selected = selected_series
+      ),
+      selectInput(
+        "bioassay_facet_col",
+        "Facet column",
+        choices = c("None", nm),
+        selected = selected_facet
+      ),
+      selectInput(
+        "bioassay_label_col",
+        "Optional annotation column",
+        choices = c("None", nm),
+        selected = selected_label
+      )
+    )
+  })
+
+  bioassay_result <- reactive({
+    req(input$bioassay_x_col, input$bioassay_y_col)
+
+    prepare_bioassay_dataset(
+      data = current_data(),
+      x_col = input$bioassay_x_col,
+      y_col = input$bioassay_y_col,
+      series_col = input$bioassay_series_col %||% "None",
+      facet_col = input$bioassay_facet_col %||% "None",
+      label_col = input$bioassay_label_col %||% "None"
+    )
+  })
+
+  bioassay_display <- reactive({
+    summary_df <- apply_bioassay_summary_preferences(
+      bioassay_result()$summary,
+      statistic = input$bioassay_summary_stat,
+      error_bars = input$bioassay_error_bars
+    )
+
+    resolve_bioassay_label_data(
+      prepared = bioassay_result(),
+      summary_df = summary_df,
+      input = input
+    )
+  })
+
   analysis_result <- eventReactive(input$run_analysis, {
     req(input$dose_col, input$response_col)
 
@@ -2754,12 +4057,31 @@ server <- function(input, output, session) {
     paste(note_parts, collapse = " | ")
   })
 
+  output$bioassay_notes <- renderText({
+    note_parts <- c(bioassay_result()$notes, bioassay_display()$notes)
+
+    if (identical(input$bioassay_plot_type, "Line plot") &&
+        isTRUE(input$bioassay_use_log10_x)) {
+      if (!bioassay_result()$x_is_numeric) {
+        note_parts <- c(note_parts, "Log10 x-axis is available only when the selected other-plot x column is numeric.")
+      } else if (any(bioassay_result()$raw$x_numeric <= 0, na.rm = TRUE)) {
+        note_parts <- c(note_parts, "Log10 x-axis was skipped because the selected other-plot x column contains zero or negative values.")
+      }
+    }
+
+    paste(note_parts, collapse = " | ")
+  })
+
   output$equation_used <- renderText({
     equation_label(input$model_equation, input$direction)
   })
 
   output$dose_plot <- renderPlot({
     build_plot(analysis_result()$prepared, analysis_result()$fit, input)
+  }, res = 130)
+
+  output$bioassay_plot <- renderPlot({
+    build_bioassay_plot(bioassay_result(), input)
   }, res = 130)
 
   output$fit_results_table <- renderDT({
@@ -2940,6 +4262,18 @@ server <- function(input, output, session) {
     )
   })
 
+  output$bioassay_summary_table <- renderDT({
+    display_df <- bioassay_display()$summary
+    numeric_cols <- vapply(display_df, is.numeric, logical(1))
+    display_df[numeric_cols] <- lapply(display_df[numeric_cols], function(x) round(x, 4))
+
+    datatable(
+      display_df,
+      rownames = FALSE,
+      options = list(pageLength = 8, scrollX = TRUE)
+    )
+  })
+
   output$example_table <- renderDT({
     datatable(
       sample_dataset(),
@@ -2983,6 +4317,40 @@ server <- function(input, output, session) {
         dpi = input$export_dpi,
         bg = resolve_plot_fill(input$background_fill)
       )
+    }
+  )
+
+  output$download_bioassay_plot <- downloadHandler(
+    filename = function() {
+      base_name <- trimws(input$export_filename)
+      if (!nzchar(base_name)) {
+        base_name <- paste0("other_plot_", Sys.Date())
+      } else {
+        base_name <- paste0(base_name, "_other_plot")
+      }
+      paste0(base_name, ".", plot_export_extension(input$export_format))
+    },
+    content = function(file) {
+      ggplot2::ggsave(
+        filename = file,
+        plot = build_bioassay_plot(bioassay_result(), input),
+        device = plot_export_device(input$export_format),
+        width = input$export_width,
+        height = input$export_height,
+        units = input$export_units,
+        dpi = input$export_dpi,
+        bg = resolve_plot_fill(input$background_fill)
+      )
+    }
+  )
+
+  output$download_bioassay_summary <- downloadHandler(
+    filename = function() {
+      paste0("other_plot_summary_", Sys.Date(), ".csv")
+    },
+    content = function(file) {
+      export_df <- bioassay_display()$summary
+      utils::write.csv(export_df, file, row.names = FALSE)
     }
   )
 }
