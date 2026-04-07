@@ -240,6 +240,12 @@ join_messages <- function(...) {
   paste(parts, collapse = " | ")
 }
 
+join_reason_flags <- function(...) {
+  parts <- unique(c(...))
+  parts <- parts[nzchar(parts) & !is.na(parts)]
+  paste(parts, collapse = "; ")
+}
+
 compute_summary <- function(df) {
   mean_df <- aggregate(response ~ group + dose, df, mean)
   sd_df <- aggregate(
@@ -653,9 +659,11 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction) {
   interpretation <- if (is.finite(ic50_value)) format_signif_text(ic50_value) else NA_character_
   reliability <- "Reliable"
   warning_text <- ""
+  reason_flags <- character(0)
 
   if (!crosses_50_observed) {
     reliability <- "Observed range does not cross 50%"
+    reason_flags <- c(reason_flags, "50% not reached")
     if (identical(direction, "Increasing") && observed_max < 50) {
       interpretation <- paste0("50% not reached (> ", format_signif_text(max_dose), ")")
       warning_text <- "Observed response never reaches 50%; IC50 is above the highest tested concentration."
@@ -672,6 +680,7 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction) {
       reliability <- "IC50 outside tested range"
       interpretation <- paste0("Extrapolated (", format_signif_text(ic50_value), ")")
     }
+    reason_flags <- c(reason_flags, "IC50 outside tested range")
     warning_text <- join_messages(
       warning_text,
       "Fitted IC50 is outside the tested concentration range and should be treated as extrapolated."
@@ -682,16 +691,19 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction) {
   fitted_span <- params$top - params$bottom
   if (!is.finite(fitted_span) || fitted_span <= 0) {
     reliability <- "Unreliable fit"
+    reason_flags <- c(reason_flags, "Flat or invalid fitted range")
     warning_text <- join_messages(warning_text, "The fitted curve collapsed to a flat or invalid response range.")
   }
 
   if (is.finite(params$bottom) && params$bottom < observed_min - 25) {
     reliability <- "Unreliable fit"
+    reason_flags <- c(reason_flags, "Bottom far below data")
     warning_text <- join_messages(warning_text, "The fitted bottom is far below the observed data.")
   }
 
   if (is.finite(params$top) && params$top > observed_max + max(25, 0.35 * max(observed_span, 1))) {
     reliability <- "Unreliable fit"
+    reason_flags <- c(reason_flags, "Top far above data")
     warning_text <- join_messages(warning_text, "The fitted top is far above the observed data.")
   }
 
@@ -706,6 +718,7 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction) {
     max_tested_concentration = max_dose,
     crosses_50_observed = crosses_50_observed,
     reliability = reliability,
+    reason_text = join_reason_flags(reason_flags),
     warning_text = warning_text,
     interpretation = interpretation
   )
@@ -895,6 +908,7 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
       direction_spearman = direction_check$spearman,
       suggested_direction = direction_check$expected_direction,
       fit_reliability = reliability$reliability,
+      fit_reason = reliability$reason_text,
       fit_warning = fit_warning,
       ic50_interpretation = reliability$interpretation,
       ic50_sd = NA_real_,
@@ -943,6 +957,7 @@ failed_fit_row <- function(group_name, model, direction, n_points, status_text) 
     direction_spearman = NA_real_,
     suggested_direction = NA_character_,
     fit_reliability = "Not fit",
+    fit_reason = status_text,
     fit_warning = status_text,
     ic50_interpretation = NA_character_,
     ic50_sd = NA_real_,
@@ -1000,6 +1015,73 @@ reporting_note_label <- function(fit_status, fit_reliability, ic50_interpretatio
   }
 
   fit_warning %||% ""
+}
+
+analysis_status_levels <- c(
+  "Report numeric IC50",
+  "Do not report numeric IC50 (50% not reached)",
+  "Do not report numeric IC50 (extrapolated)",
+  "Numeric IC50 shown; review fit",
+  "No fit available"
+)
+
+analysis_status_descriptions <- c(
+  "Numeric IC50 reportable",
+  "50% not reached",
+  "IC50 extrapolated",
+  "Review fit before reporting",
+  "No fit available"
+)
+
+summarize_analysis_results <- function(result_df) {
+  counts <- table(factor(result_df$reporting_status, levels = analysis_status_levels))
+  counts <- setNames(as.integer(counts), analysis_status_levels)
+
+  fit_reasons <- result_df$fit_reason
+  fit_reasons <- fit_reasons[!is.na(fit_reasons) & nzchar(fit_reasons)]
+  reason_counts <- sort(table(fit_reasons), decreasing = TRUE)
+
+  list(
+    counts = counts,
+    reason_counts = reason_counts
+  )
+}
+
+analysis_summary_modal <- function(summary_info) {
+  status_items <- Map(function(status_label, display_label) {
+    count_value <- summary_info$counts[[status_label]]
+    if (!isTRUE(count_value > 0)) {
+      return(NULL)
+    }
+    tags$li(sprintf("%s: %s", display_label, count_value))
+  }, analysis_status_levels, analysis_status_descriptions)
+  status_items <- Filter(Negate(is.null), status_items)
+
+  reason_items <- NULL
+  if (length(summary_info$reason_counts) > 0) {
+    top_reasons <- head(summary_info$reason_counts, 5)
+    reason_items <- lapply(seq_along(top_reasons), function(i) {
+      tags$li(sprintf("%s: %s", names(top_reasons)[i], as.integer(top_reasons[[i]])))
+    })
+  }
+
+  modalDialog(
+    title = "Analysis notes",
+    easyClose = TRUE,
+    size = "m",
+    footer = modalButton("Close"),
+    tags$p("Review these points before reporting IC50 values from this run."),
+    tags$ul(class = "analysis-summary-list", status_items),
+    if (!is.null(reason_items)) tagList(
+      tags$h4("Main fit reasons"),
+      tags$ul(class = "analysis-summary-list", reason_items)
+    ),
+    tags$div(
+      class = "analysis-summary-tip",
+      tags$strong("Tip: "),
+      "Use reporting_status to decide whether a numeric IC50 should be reported, fit_reason for the short cause, and reporting_note for the longer explanation in the exported results."
+    )
+  )
 }
 
 fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, uncertainty_method = "None", bootstrap_iterations = 200, progress_callback = NULL) {
@@ -1774,12 +1856,66 @@ ui <- fluidPage(
         padding: 18px;
         border: 1px solid #eadfca;
       }
+      .run-bar {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-wrap: wrap;
+        background: linear-gradient(135deg, #fff9ef 0%, #f6efe3 100%);
+        border: 1px solid #eadfca;
+        border-radius: 16px;
+        padding: 14px 16px;
+        margin-bottom: 14px;
+      }
+      .run-button.btn-primary {
+        min-width: 168px;
+        min-height: 54px;
+        border-radius: 16px;
+        border: 1px solid #0c5f59;
+        background: linear-gradient(180deg, #13877f 0%, #0f766e 100%);
+        box-shadow: 0 10px 24px rgba(15, 118, 110, 0.16);
+        font-size: 21px;
+        font-weight: 700;
+        padding: 10px 22px;
+      }
+      .run-button.btn-primary:hover,
+      .run-button.btn-primary:focus {
+        background: linear-gradient(180deg, #0f766e 0%, #0c5f59 100%);
+        border-color: #0c5f59;
+      }
+      .run-copy {
+        flex: 1 1 220px;
+        min-width: 220px;
+      }
+      .run-copy-title {
+        color: #102a43;
+        font-weight: 700;
+        margin-bottom: 2px;
+      }
+      .run-copy-text {
+        color: #52606d;
+        line-height: 1.45;
+      }
       .note-block {
         background: #fff9ef;
         border-left: 5px solid #b45309;
         border-radius: 12px;
         padding: 12px 14px;
         margin-bottom: 14px;
+      }
+      .analysis-summary-list {
+        padding-left: 18px;
+        margin-bottom: 10px;
+      }
+      .analysis-summary-list li {
+        margin-bottom: 6px;
+      }
+      .analysis-summary-tip {
+        background: #fff9ef;
+        border-radius: 12px;
+        border: 1px solid #eadfca;
+        padding: 10px 12px;
+        margin-top: 8px;
       }
       .well {
         background: #fffdfa;
@@ -1827,6 +1963,19 @@ ui <- fluidPage(
         border-radius: 999px;
         font-weight: 700;
       }
+      .secondary-action {
+        border-radius: 999px;
+        border: 1px solid #d8c8ad;
+        background: #fffdfa;
+        color: #8b5e34;
+        font-weight: 700;
+      }
+      .secondary-action:hover,
+      .secondary-action:focus {
+        background: #f8efe2;
+        color: #7a4f28;
+        border-color: #c9b18a;
+      }
       .form-control, .selectize-input {
         border-radius: 12px !important;
         border-color: #d8c8ad;
@@ -1847,15 +1996,22 @@ ui <- fluidPage(
       sidebarPanel(
         class = "sidebar-panel",
         width = 4,
-        actionButton("run_analysis", "Run analysis", class = "btn-primary"),
-        helpText("Change settings, then click Run analysis to refresh IC50 values and plots."),
+        div(
+          class = "run-bar",
+          actionButton("run_analysis", "Run analysis", class = "btn-primary run-button"),
+          div(
+            class = "run-copy",
+            div(class = "run-copy-title", "Refresh fits, IC50 values, and warnings"),
+            div(class = "run-copy-text", "Change settings, then run the analysis to update the curves, result table, and model suggestions.")
+          )
+        ),
         tags$details(
           class = "well",
           open = NA,
           tags$summary("Data and mapping"),
           br(),
           fileInput("data_file", "Upload data", accept = c(".csv", ".tsv", ".txt", ".xls", ".xlsx")),
-          actionButton("load_example", "Use example dataset", class = "btn-primary"),
+          actionButton("load_example", "Use example dataset", class = "secondary-action"),
           br(), br(),
           uiOutput("sheet_ui"),
           uiOutput("mapping_ui")
@@ -2077,11 +2233,24 @@ ui <- fluidPage(
             tags$p("Orange rows mean the fitted IC50 is outside the tested range and should be treated as extrapolated."),
             tags$p("Red rows mean the fit needs review before reporting."),
             tags$p("Gray rows mean the app could not fit the curve."),
+            tags$p("The fit_reason column gives the short explanation for each flagged row, while reporting_note keeps the longer sentence for export and deeper review."),
+            br(),
+            h4("Understanding fit_reason"),
+            tags$p("Top far above data: the fitted upper plateau is much higher than the observed points, so a flexible model such as 4PL is extrapolating beyond the measured range."),
+            tags$p("Bottom far below data: the fitted lower plateau falls well below the observed low-concentration responses."),
+            tags$p("50% not reached: the observed data never cross the 50% response level, so the app does not report a numeric IC50."),
+            tags$p("IC50 outside tested range: the fitted crossing of 50% lies outside the concentration range you actually tested."),
+            tags$p("Flat or invalid fitted range: the model collapsed to a nearly flat or otherwise implausible curve."),
+            tags$p("If several groups are flagged for top or bottom problems, try a simpler model such as 3PL or expand the tested concentration range."),
             br(),
             h4("Uncertainty"),
             tags$p("95% CI is usually the best option for publication because it communicates uncertainty around the fitted parameter."),
             tags$p("SD and SEM in this app come from bootstrap resampling of IC50, not from the raw response standard deviation at each concentration."),
             tags$p("For speed, keep uncertainty off during exploration. Around 50 bootstrap iterations is a quick preview, and 100 to 200 is a more reasonable starting point for final reporting."),
+            br(),
+            h4("After each run"),
+            tags$p("When the analysis finishes, the app can show a short summary window if any groups need attention."),
+            tags$p("Use reporting_status to decide whether a numeric IC50 should be reported, fit_reason for the short cause, and reporting_note when you want the longer explanation."),
             br(),
             h4("Troubleshooting"),
             tags$p("If the fit looks flat or wrong, first check the selected group column and curve direction."),
@@ -2254,6 +2423,22 @@ server <- function(input, output, session) {
     })
   }, ignoreNULL = FALSE)
 
+  observeEvent(analysis_result(), ignoreInit = TRUE, {
+    result_df <- analysis_result()$fit$results
+    summary_info <- summarize_analysis_results(result_df)
+    issue_total <- sum(summary_info$counts[names(summary_info$counts) != "Report numeric IC50"])
+
+    if (issue_total > 0) {
+      showModal(analysis_summary_modal(summary_info))
+    } else {
+      showNotification(
+        "Analysis complete. All fitted groups are currently reportable as numeric IC50 values.",
+        type = "message",
+        duration = 5
+      )
+    }
+  })
+
   output$data_notes <- renderText({
     comparison_note <- NULL
     if (!is.null(analysis_result()$comparison)) {
@@ -2285,8 +2470,8 @@ server <- function(input, output, session) {
       "ic50",
       "ic50_reported",
       "reporting_status",
-      "reporting_note",
       "fit_reliability",
+      "fit_reason",
       "suggested_direction",
       "r_squared",
       "n_points",

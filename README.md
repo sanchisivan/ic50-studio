@@ -15,6 +15,8 @@ It is designed for people who normally work in spreadsheet-based curve-fitting t
 - Report IC50 with `None`, `95% CI`, `+/- SD`, or `+/- SEM`
 - Export plots and results tables
 - Flag non-reportable IC50 values such as curves that never reach 50%
+- Show short fit-quality reasons such as `Top far above data` or `50% not reached`
+- Show an analysis summary window after fitting when some groups need review
 
 ## Installation
 
@@ -78,8 +80,30 @@ The app reports a `reporting_status` column to make it clearer what should and s
 - `Report numeric IC50`: the fit looks acceptable for numeric reporting
 - `Do not report numeric IC50 (50% not reached)`: the observed data never reach 50%, so report this as above or below the tested range instead of giving a numeric IC50
 - `Do not report numeric IC50 (extrapolated)`: the fitted IC50 falls outside the tested concentration range
-- `Review fit before reporting`: the fit exists, but the curve shape or plateau behavior needs caution
+- `Numeric IC50 shown; review fit`: the fit exists, but the curve shape or plateau behavior needs caution
 - `No fit available`: the curve could not be fit
+
+The table also includes a `fit_reason` column with a short explanation:
+
+- `Top far above data`: the fitted upper plateau is much higher than the observed points, so the model is extrapolating strongly
+- `Bottom far below data`: the fitted lower plateau drops well below the observed low-response points
+- `50% not reached`: the observed responses never cross the 50% level, so the app does not report a numeric IC50
+- `IC50 outside tested range`: the fitted crossing of 50% lies outside the tested concentration range
+- `Flat or invalid fitted range`: the fitted curve collapsed to an implausible response span
+
+In many practical cases, a visually smooth `4PL` can still be flagged if the fitted top or bottom is unrealistic. When this happens, try a simpler model such as `3PL (Hill fixed = 1)` or expand the concentration range.
+
+## Analysis summary window
+
+After each run, the app can show a short summary window if any groups need attention. This summary helps you quickly see:
+
+- how many groups are reportable
+- how many groups did not reach 50%
+- how many groups are extrapolated
+- how many groups need manual review
+- the most common `fit_reason` values in that run
+
+Use the popup as a quick warning, then check the full `Fit Results` table for the final interpretation.
 
 ## IC50 uncertainty
 
@@ -102,6 +126,7 @@ IC50 uncertainty is optional and uses bootstrap resampling.
 
 - If the fit looks flat or wrong, first check the selected group column and curve direction.
 - If the app reports that 50% was not reached, expand the concentration range instead of forcing a numeric IC50.
+- If many groups are marked `Top far above data`, the selected model is probably too flexible for the available plateau information.
 - If you are working with inhibition data, consider `Invert as 100 - response`.
 - If different compounds behave very differently, use the model comparison option before enabling bootstrap.
 
