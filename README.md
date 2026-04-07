@@ -4,6 +4,8 @@ IC50 Studio is an R Shiny app for loading dose-response data, fitting common sig
 
 It is designed for people who normally work in spreadsheet-based curve-fitting tools but want an open, editable workflow in R.
 
+Developed at the **Laboratory of Bioactive Peptides (LPB)**, Faculty of Biochemistry and Biological Sciences, National University of the Littoral (UNL), Santa Fe, Argentina.
+
 ## Features
 
 - Import `csv`, `tsv`, `txt`, `xls`, and `xlsx`
@@ -132,4 +134,22 @@ IC50 uncertainty is optional and uses bootstrap resampling.
 
 ## Included help
 
-The app also includes an `Instructions` tab with a built-in quick guide, model advice, uncertainty notes, and troubleshooting tips.
+The app also includes an `Instructions` tab with a built-in quick guide, model advice, uncertainty notes, and troubleshooting tips, plus an `About` tab with project and contact information.
+
+## Contact
+
+| | |
+|---|---|
+| **Dr. Ivan Sanchis** (app development) | sanchisivan@fbcb.unl.edu.ar |
+| **Prof. Alvaro Sebastian Siano** (scientific lead) | asiano@fbcb.unl.edu.ar |
+
+Laboratory of Bioactive Peptides (LPB)  
+Faculty of Biochemistry and Biological Sciences (FBCB)  
+National University of the Littoral (UNL)  
+Santa Fe, Argentina
+
+Repository: [github.com/sanchisivan/ic50-studio](https://github.com/sanchisivan/ic50-studio)
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for the full text.

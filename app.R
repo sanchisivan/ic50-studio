@@ -234,6 +234,13 @@ format_signif_text <- function(x, digits = 4) {
   format(signif(x, digits), trim = TRUE, scientific = FALSE)
 }
 
+format_decimal_text <- function(x, decimals = 2) {
+  if (!is.finite(x)) {
+    return(NA_character_)
+  }
+  formatC(x, format = "f", digits = decimals)
+}
+
 join_messages <- function(...) {
   parts <- c(...)
   parts <- parts[nzchar(parts) & !is.na(parts)]
@@ -554,7 +561,7 @@ bootstrap_group_data <- function(raw_group_df) {
   out
 }
 
-estimate_ic50_uncertainty <- function(raw_group_df, group_name, fit_to, model, direction, weighting, curve_points, use_log10_axis, extend_curve_toward_zero, extra_log_decades, bootstrap_iterations, progress_step = NULL) {
+estimate_ic50_uncertainty <- function(raw_group_df, group_name, fit_to, model, direction, weighting, curve_points, use_log10_axis, extend_curve_toward_zero, extra_log_decades, bootstrap_iterations, ic50_decimals = 2, progress_step = NULL) {
   if (bootstrap_iterations < 2 || length(unique(raw_group_df$dose)) < 4) {
     return(empty_uncertainty())
   }
@@ -575,7 +582,8 @@ estimate_ic50_uncertainty <- function(raw_group_df, group_name, fit_to, model, d
         curve_points = curve_points,
         use_log10_axis = use_log10_axis,
         extend_curve_toward_zero = extend_curve_toward_zero,
-        extra_log_decades = extra_log_decades
+        extra_log_decades = extra_log_decades,
+        ic50_decimals = ic50_decimals
       ),
       silent = TRUE
     )
@@ -603,23 +611,23 @@ estimate_ic50_uncertainty <- function(raw_group_df, group_name, fit_to, model, d
   )
 }
 
-format_ic50_report <- function(ic50_value, uncertainty_method, uncertainty_values) {
+format_ic50_report <- function(ic50_value, uncertainty_method, uncertainty_values, decimals = 2) {
   if (!is.finite(ic50_value)) {
     return(NA_character_)
   }
 
-  center <- format_signif_text(ic50_value)
+  center <- format_decimal_text(ic50_value, decimals)
 
   if (identical(uncertainty_method, "None")) {
     return(center)
   }
 
   if (identical(uncertainty_method, "\u00b1 SD") && is.finite(uncertainty_values$ic50_sd)) {
-    return(sprintf("%s \u00b1 %s", center, format_signif_text(uncertainty_values$ic50_sd, 3)))
+    return(sprintf("%s \u00b1 %s", center, format_decimal_text(uncertainty_values$ic50_sd, decimals)))
   }
 
   if (identical(uncertainty_method, "\u00b1 SEM") && is.finite(uncertainty_values$ic50_sem)) {
-    return(sprintf("%s \u00b1 %s", center, format_signif_text(uncertainty_values$ic50_sem, 3)))
+    return(sprintf("%s \u00b1 %s", center, format_decimal_text(uncertainty_values$ic50_sem, decimals)))
   }
 
   if (identical(uncertainty_method, "95% CI") &&
@@ -628,8 +636,8 @@ format_ic50_report <- function(ic50_value, uncertainty_method, uncertainty_value
     return(sprintf(
       "%s (95%% CI %s to %s)",
       center,
-      format_signif_text(uncertainty_values$ic50_ci95_low, 4),
-      format_signif_text(uncertainty_values$ic50_ci95_high, 4)
+      format_decimal_text(uncertainty_values$ic50_ci95_low, decimals),
+      format_decimal_text(uncertainty_values$ic50_ci95_high, decimals)
     ))
   }
 
@@ -649,14 +657,14 @@ detect_direction_mismatch <- function(x, y, selected_direction) {
   )
 }
 
-assess_ic50_reliability <- function(df, params, ic50_value, direction) {
+assess_ic50_reliability <- function(df, params, ic50_value, direction, ic50_decimals = 2) {
   observed_min <- min(df$response, na.rm = TRUE)
   observed_max <- max(df$response, na.rm = TRUE)
   min_dose <- min(df$dose, na.rm = TRUE)
   max_dose <- max(df$dose, na.rm = TRUE)
   crosses_50_observed <- observed_min <= 50 && observed_max >= 50
 
-  interpretation <- if (is.finite(ic50_value)) format_signif_text(ic50_value) else NA_character_
+  interpretation <- if (is.finite(ic50_value)) format_decimal_text(ic50_value, ic50_decimals) else NA_character_
   reliability <- "Reliable"
   warning_text <- ""
   reason_flags <- character(0)
@@ -665,10 +673,10 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction) {
     reliability <- "Observed range does not cross 50%"
     reason_flags <- c(reason_flags, "50% not reached")
     if (identical(direction, "Increasing") && observed_max < 50) {
-      interpretation <- paste0("50% not reached (> ", format_signif_text(max_dose), ")")
+      interpretation <- paste0("50% not reached (> ", format_decimal_text(max_dose, ic50_decimals), ")")
       warning_text <- "Observed response never reaches 50%; IC50 is above the highest tested concentration."
     } else if (identical(direction, "Decreasing") && observed_min > 50) {
-      interpretation <- paste0("50% not reached (< ", format_signif_text(min_dose), ")")
+      interpretation <- paste0("50% not reached (< ", format_decimal_text(min_dose, ic50_decimals), ")")
       warning_text <- "Observed response never drops to 50%; IC50 is below the lowest tested concentration."
     } else {
       warning_text <- "Observed data do not span the 50% response level."
@@ -678,7 +686,7 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction) {
   if (is.finite(ic50_value) && (ic50_value < min_dose || ic50_value > max_dose)) {
     if (identical(reliability, "Reliable")) {
       reliability <- "IC50 outside tested range"
-      interpretation <- paste0("Extrapolated (", format_signif_text(ic50_value), ")")
+      interpretation <- paste0("Extrapolated (", format_decimal_text(ic50_value, ic50_decimals), ")")
     }
     reason_flags <- c(reason_flags, "IC50 outside tested range")
     warning_text <- join_messages(
@@ -724,7 +732,7 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction) {
   )
 }
 
-fit_single_group <- function(df, group_name, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1) {
+fit_single_group <- function(df, group_name, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, ic50_decimals = 2) {
   if (identical(direction, "Auto-detect")) {
     direction_check <- detect_direction_mismatch(df$dose, df$response, "Increasing")
     candidate_directions <- unique(c(direction_check$expected_direction, "Increasing", "Decreasing"))
@@ -739,7 +747,8 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
           curve_points,
           use_log10_axis = use_log10_axis,
           extend_curve_toward_zero = extend_curve_toward_zero,
-          extra_log_decades = extra_log_decades
+          extra_log_decades = extra_log_decades,
+          ic50_decimals = ic50_decimals
         ),
         silent = TRUE
       )
@@ -872,7 +881,7 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
   r_squared <- if (sst > 0) 1 - sse / sst else NA_real_
   half_max_ic50 <- compute_half_max_ic50(params, model, direction, x)
   direction_check <- detect_direction_mismatch(x, y, direction)
-  reliability <- assess_ic50_reliability(df, params, half_max_ic50, direction)
+  reliability <- assess_ic50_reliability(df, params, half_max_ic50, direction, ic50_decimals = ic50_decimals)
   fit_warning <- reliability$warning_text
 
   if (isTRUE(direction_check$mismatch)) {
@@ -971,24 +980,30 @@ failed_fit_row <- function(group_name, model, direction, n_points, status_text) 
   )
 }
 
+status_report_numeric <- "Report numeric IC50"
+status_not_reached <- "Do not report numeric IC50 (50% not reached)"
+status_extrapolated <- "Do not report numeric IC50 (extrapolated)"
+status_review_fit <- "Numeric IC50 shown; review fit"
+status_no_fit <- "No fit available"
+
 reporting_status_label <- function(fit_status, fit_reliability) {
   if (!identical(fit_status, "OK")) {
-    return("No fit available")
+    return(status_no_fit)
   }
 
   if (identical(fit_reliability, "Reliable")) {
-    return("Report numeric IC50")
+    return(status_report_numeric)
   }
 
   if (identical(fit_reliability, "Observed range does not cross 50%")) {
-    return("Do not report numeric IC50 (50% not reached)")
+    return(status_not_reached)
   }
 
   if (identical(fit_reliability, "IC50 outside tested range")) {
-    return("Do not report numeric IC50 (extrapolated)")
+    return(status_extrapolated)
   }
 
-  "Numeric IC50 shown; review fit"
+  status_review_fit
 }
 
 reporting_note_label <- function(fit_status, fit_reliability, ic50_interpretation, fit_warning) {
@@ -1017,12 +1032,81 @@ reporting_note_label <- function(fit_status, fit_reliability, ic50_interpretatio
   fit_warning %||% ""
 }
 
+refresh_results_display <- function(result_df, uncertainty_method, decimals = 2) {
+  if (!nrow(result_df)) {
+    return(result_df)
+  }
+
+  refreshed <- result_df
+
+  refreshed$ic50_interpretation <- vapply(seq_len(nrow(refreshed)), function(i) {
+    if (!identical(refreshed$fit_status[i], "OK")) {
+      return(refreshed$ic50_interpretation[i] %||% NA_character_)
+    }
+
+    reliability <- refreshed$fit_reliability[i]
+    direction <- refreshed$direction[i]
+
+    if (identical(reliability, "Observed range does not cross 50%")) {
+      if (identical(direction, "Increasing") && is.finite(refreshed$max_tested_concentration[i])) {
+        return(paste0("50% not reached (> ", format_decimal_text(refreshed$max_tested_concentration[i], decimals), ")"))
+      }
+      if (identical(direction, "Decreasing") && is.finite(refreshed$min_tested_concentration[i])) {
+        return(paste0("50% not reached (< ", format_decimal_text(refreshed$min_tested_concentration[i], decimals), ")"))
+      }
+    }
+
+    if (identical(reliability, "IC50 outside tested range") && is.finite(refreshed$ic50[i])) {
+      return(paste0("Extrapolated (", format_decimal_text(refreshed$ic50[i], decimals), ")"))
+    }
+
+    refreshed$ic50_interpretation[i] %||% NA_character_
+  }, character(1))
+
+  refreshed$ic50_reported <- vapply(seq_len(nrow(refreshed)), function(i) {
+    if (!identical(refreshed$fit_status[i], "OK")) {
+      return(refreshed$ic50_reported[i] %||% NA_character_)
+    }
+
+    if (identical(refreshed$fit_reliability[i], "Observed range does not cross 50%")) {
+      return(refreshed$ic50_interpretation[i] %||% NA_character_)
+    }
+
+    if (is.finite(refreshed$ic50[i])) {
+      return(format_ic50_report(
+        ic50_value = refreshed$ic50[i],
+        uncertainty_method = uncertainty_method,
+        uncertainty_values = list(
+          ic50_sd = refreshed$ic50_sd[i],
+          ic50_sem = refreshed$ic50_sem[i],
+          ic50_ci95_low = refreshed$ic50_ci95_low[i],
+          ic50_ci95_high = refreshed$ic50_ci95_high[i]
+        ),
+        decimals = decimals
+      ))
+    }
+
+    refreshed$ic50_reported[i] %||% NA_character_
+  }, character(1))
+
+  refreshed$reporting_note <- vapply(seq_len(nrow(refreshed)), function(i) {
+    reporting_note_label(
+      fit_status = refreshed$fit_status[i],
+      fit_reliability = refreshed$fit_reliability[i],
+      ic50_interpretation = refreshed$ic50_interpretation[i],
+      fit_warning = refreshed$fit_warning[i]
+    )
+  }, character(1))
+
+  refreshed
+}
+
 analysis_status_levels <- c(
-  "Report numeric IC50",
-  "Do not report numeric IC50 (50% not reached)",
-  "Do not report numeric IC50 (extrapolated)",
-  "Numeric IC50 shown; review fit",
-  "No fit available"
+  status_report_numeric,
+  status_not_reached,
+  status_extrapolated,
+  status_review_fit,
+  status_no_fit
 )
 
 analysis_status_descriptions <- c(
@@ -1040,14 +1124,21 @@ summarize_analysis_results <- function(result_df) {
   fit_reasons <- result_df$fit_reason
   fit_reasons <- fit_reasons[!is.na(fit_reasons) & nzchar(fit_reasons)]
   reason_counts <- sort(table(fit_reasons), decreasing = TRUE)
+  numeric_without_50_count <- sum(
+    result_df$fit_status == "OK" &
+      grepl("50% not reached", result_df$fit_reason %||% "", fixed = TRUE) &
+      is.finite(result_df$ic50),
+    na.rm = TRUE
+  )
 
   list(
     counts = counts,
-    reason_counts = reason_counts
+    reason_counts = reason_counts,
+    numeric_without_50_count = numeric_without_50_count
   )
 }
 
-analysis_summary_modal <- function(summary_info) {
+analysis_summary_modal <- function(summary_info, comparison = NULL, selected_model = NULL) {
   status_items <- Map(function(status_label, display_label) {
     count_value <- summary_info$counts[[status_label]]
     if (!isTRUE(count_value > 0)) {
@@ -1065,6 +1156,32 @@ analysis_summary_modal <- function(summary_info) {
     })
   }
 
+  comparison_block <- NULL
+  if (!is.null(comparison) && nzchar(comparison$recommended_model %||% "")) {
+    recommended_row <- comparison$summary[comparison$summary$model == comparison$recommended_model, , drop = FALSE]
+    comparison_block <- tagList(
+      tags$h4("Best model from comparison"),
+      tags$p(sprintf("Suggested model: %s", comparison$recommended_model)),
+      if (nrow(recommended_row) == 1) {
+        tags$ul(
+          class = "analysis-summary-list",
+          tags$li(sprintf("Reportable numeric IC50 values: %s", recommended_row$numeric_ic50_reportable[1])),
+          tags$li(sprintf("Groups fit: %s", recommended_row$groups_fit[1])),
+          tags$li(sprintf("Groups needing review: %s", recommended_row$review_before_reporting[1])),
+          tags$li(sprintf("Median R-squared: %s", format_signif_text(recommended_row$median_r_squared[1], 3)))
+        )
+      },
+      if (!is.null(selected_model) && !identical(selected_model, comparison$recommended_model)) {
+        tags$div(
+          class = "analysis-summary-tip",
+          tags$strong("Current selected model: "),
+          selected_model,
+          ". Use the suggested-model button in the Model Comparison tab if you want to switch."
+        )
+      }
+    )
+  }
+
   modalDialog(
     title = "Analysis notes",
     easyClose = TRUE,
@@ -1072,6 +1189,17 @@ analysis_summary_modal <- function(summary_info) {
     footer = modalButton("Close"),
     tags$p("Review these points before reporting IC50 values from this run."),
     tags$ul(class = "analysis-summary-list", status_items),
+    if (isTRUE(summary_info$numeric_without_50_count > 0)) {
+      tags$div(
+        class = "analysis-summary-tip",
+        tags$strong("Warning: "),
+        sprintf(
+          "%s group(s) still have a numeric IC50 even though the observed data did not cross 50%%. Treat those values cautiously.",
+          summary_info$numeric_without_50_count
+        )
+      )
+    },
+    comparison_block,
     if (!is.null(reason_items)) tagList(
       tags$h4("Main fit reasons"),
       tags$ul(class = "analysis-summary-list", reason_items)
@@ -1084,7 +1212,7 @@ analysis_summary_modal <- function(summary_info) {
   )
 }
 
-fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, uncertainty_method = "None", bootstrap_iterations = 200, progress_callback = NULL) {
+fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, uncertainty_method = "None", bootstrap_iterations = 200, ic50_decimals = 2, progress_callback = NULL) {
   fit_source <- if (identical(fit_to, "Group means")) prepared$summary else prepared$raw
   split_groups <- split(fit_source, fit_source$group)
   diagnostics_df <- group_diagnostics(fit_source)
@@ -1130,7 +1258,8 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
         curve_points = curve_points,
         use_log10_axis = use_log10_axis,
         extend_curve_toward_zero = extend_curve_toward_zero,
-        extra_log_decades = extra_log_decades
+        extra_log_decades = extra_log_decades,
+        ic50_decimals = ic50_decimals
       ),
       error = function(e) {
         list(
@@ -1163,6 +1292,7 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
         extend_curve_toward_zero = extend_curve_toward_zero,
         extra_log_decades = extra_log_decades,
         bootstrap_iterations = bootstrap_iterations,
+        ic50_decimals = ic50_decimals,
         progress_step = step_progress
       )
 
@@ -1174,13 +1304,15 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
       fits[[group_name]]$result_row$ic50_reported <- format_ic50_report(
         ic50_value = fits[[group_name]]$result_row$ic50[1],
         uncertainty_method = uncertainty_method,
-        uncertainty_values = uncertainty_values
+        uncertainty_values = uncertainty_values,
+        decimals = ic50_decimals
       )
     } else if (fits[[group_name]]$result_row$fit_status[1] == "OK") {
       fits[[group_name]]$result_row$ic50_reported <- format_ic50_report(
         ic50_value = fits[[group_name]]$result_row$ic50[1],
         uncertainty_method = uncertainty_method,
-        uncertainty_values = empty_uncertainty()
+        uncertainty_values = empty_uncertainty(),
+        decimals = ic50_decimals
       )
     }
 
@@ -1215,7 +1347,7 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
   if (any(missing_display_mask)) {
     results_df$ic50_reported[missing_display_mask] <- vapply(
       results_df$ic50[missing_display_mask],
-      format_signif_text,
+      function(x) format_decimal_text(x, ic50_decimals),
       character(1)
     )
   }
@@ -1283,7 +1415,7 @@ model_parameter_count <- function(model) {
   )
 }
 
-compare_models <- function(prepared, fit_to, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, progress_callback = NULL) {
+compare_models <- function(prepared, fit_to, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, ic50_decimals = 2, progress_callback = NULL) {
   model_fits <- vector("list", length(all_model_choices))
   names(model_fits) <- all_model_choices
 
@@ -1299,12 +1431,13 @@ compare_models <- function(prepared, fit_to, direction, weighting, curve_points,
       direction = direction,
       weighting = weighting,
       curve_points = curve_points,
-      use_log10_axis = use_log10_axis,
-      extend_curve_toward_zero = extend_curve_toward_zero,
-      extra_log_decades = extra_log_decades,
-      uncertainty_method = "None",
-      bootstrap_iterations = 20,
-      progress_callback = function(detail_text, current_step, total_step_count) {
+        use_log10_axis = use_log10_axis,
+        extend_curve_toward_zero = extend_curve_toward_zero,
+        extra_log_decades = extra_log_decades,
+        uncertainty_method = "None",
+        bootstrap_iterations = 20,
+        ic50_decimals = ic50_decimals,
+        progress_callback = function(detail_text, current_step, total_step_count) {
         if (!is.null(progress_callback)) {
           overall_step <- (i - 1) * max(total_step_count, 1) + current_step
           progress_callback(
@@ -1320,10 +1453,10 @@ compare_models <- function(prepared, fit_to, direction, weighting, curve_points,
   summary_df <- do.call(rbind, lapply(all_model_choices, function(model_name) {
     result_df <- model_fits[[model_name]]$results
     ok_mask <- result_df$fit_status == "OK"
-    reliable_mask <- ok_mask & result_df$reporting_status == "Report numeric IC50"
-    not_reached_mask <- ok_mask & result_df$reporting_status == "Do not report numeric IC50 (50% not reached)"
-    extrapolated_mask <- ok_mask & result_df$reporting_status == "Do not report numeric IC50 (extrapolated)"
-    review_mask <- ok_mask & result_df$reporting_status == "Review fit before reporting"
+    reliable_mask <- ok_mask & result_df$reporting_status == status_report_numeric
+    not_reached_mask <- ok_mask & result_df$reporting_status == status_not_reached
+    extrapolated_mask <- ok_mask & result_df$reporting_status == status_extrapolated
+    review_mask <- ok_mask & result_df$reporting_status == status_review_fit
     r_sq_values <- result_df$r_squared[ok_mask & is.finite(result_df$r_squared)]
 
     data.frame(
@@ -1464,7 +1597,7 @@ resolve_panel_fill <- function(background_fill) {
   )
 }
 
-publication_theme <- function(style_name, base_size, legend_position, background_fill) {
+publication_theme <- function(style_name, base_size, legend_position, background_fill, grid_mode = "Match style") {
   panel_fill <- resolve_panel_fill(background_fill)
   plot_fill <- resolve_plot_fill(background_fill)
 
@@ -1508,17 +1641,38 @@ publication_theme <- function(style_name, base_size, legend_position, background
     themed <- themed +
       theme(
         panel.border = element_rect(colour = "#111111", fill = NA, size = 0.9),
-        panel.grid.major = element_blank(),
         axis.line = element_blank(),
         axis.ticks = element_line(colour = "#111111", size = 0.8)
       )
-  } else {
-    themed <- themed +
-      theme(
-        panel.grid.major.x = element_line(colour = "#e5e7eb"),
-        panel.grid.major.y = element_line(colour = "#e5e7eb")
-      )
   }
+
+  effective_grid_mode <- if (identical(grid_mode, "Match style")) {
+    if (identical(style_name, "Minimal clean")) "Both" else "None"
+  } else {
+    grid_mode
+  }
+
+  grid_theme <- switch(
+    effective_grid_mode,
+    "Horizontal" = theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_line(colour = "#e5e7eb")
+    ),
+    "Vertical" = theme(
+      panel.grid.major.x = element_line(colour = "#e5e7eb"),
+      panel.grid.major.y = element_blank()
+    ),
+    "Both" = theme(
+      panel.grid.major.x = element_line(colour = "#e5e7eb"),
+      panel.grid.major.y = element_line(colour = "#e5e7eb")
+    ),
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_blank()
+    )
+  )
+
+  themed <- themed + grid_theme
 
   if (identical(tolower(legend_position), "none")) {
     themed <- themed + theme(legend.position = "none")
@@ -1760,7 +1914,8 @@ build_plot <- function(prepared, fit_data, input) {
       style_name = input$plot_style,
       base_size = input$base_font_size,
       legend_position = input$legend_position,
-      background_fill = input$background_fill
+      background_fill = input$background_fill,
+      grid_mode = input$plot_grid_mode
     )
 
   if (isTRUE(input$use_group_shapes)) {
@@ -2069,8 +2224,9 @@ ui <- fluidPage(
             choices = c("95% CI", "\u00b1 SD", "\u00b1 SEM", "None"),
             selected = "None"
           ),
+          numericInput("ic50_decimals", "IC50 decimal places", value = 2, min = 0, max = 8, step = 1),
           numericInput("bootstrap_iterations", "Bootstrap iterations", value = 50, min = 20, max = 2000, step = 10),
-          helpText("Use 100 to 200 bootstrap iterations for publication-oriented IC50 uncertainty."),
+          helpText("Use 100 to 200 bootstrap iterations for publication-oriented IC50 uncertainty. Reported IC50 values and \u00b1 uncertainty use the same number of decimals."),
           numericInput("curve_points", "Curve resolution", value = 250, min = 100, max = 1000, step = 50)
         ),
         tags$details(
@@ -2103,6 +2259,12 @@ ui <- fluidPage(
             "Plot style",
             choices = c("Publication boxed", "Framed clean", "Classic axes", "Minimal clean"),
             selected = "Publication boxed"
+          ),
+          selectInput(
+            "plot_grid_mode",
+            "Plot grid lines",
+            choices = c("Match style", "None", "Horizontal", "Vertical", "Both"),
+            selected = "Match style"
           ),
           selectInput(
             "palette_name",
@@ -2259,6 +2421,44 @@ ui <- fluidPage(
             tags$p("On log-scale plots, the zero-dose extension works by drawing the curve for extra log10 decades below the minimum observed concentration, because zero itself cannot be shown on a log axis."),
             h4("Example layout"),
             DTOutput("example_table")
+          ),
+          tabPanel(
+            "About",
+            br(),
+            h3("IC50 Studio"),
+            tags$p("IC50 Studio is an open R Shiny app for dose-response fitting, IC50 interpretation, and publication-oriented figure export."),
+            br(),
+            h4("Developed by"),
+            tags$p(tags$strong("Dr. Ivan Sanchis"), " - app development and maintenance"),
+            tags$p(tags$strong("Prof. Alvaro Sebastian Siano"), " - scientific lead"),
+            br(),
+            h4("Affiliation"),
+            tags$p("Laboratory of Bioactive Peptides (LPB)"),
+            tags$p("Faculty of Biochemistry and Biological Sciences (FBCB)"),
+            tags$p("National University of the Littoral (UNL)"),
+            tags$p("Santa Fe, Argentina"),
+            br(),
+            h4("Contact"),
+            tags$p(
+              "Ivan Sanchis: ",
+              tags$a("sanchisivan@fbcb.unl.edu.ar", href = "mailto:sanchisivan@fbcb.unl.edu.ar")
+            ),
+            tags$p(
+              "Alvaro Sebastian Siano: ",
+              tags$a("asiano@fbcb.unl.edu.ar", href = "mailto:asiano@fbcb.unl.edu.ar")
+            ),
+            br(),
+            h4("Repository"),
+            tags$p(
+              tags$a(
+                "github.com/sanchisivan/ic50-studio",
+                href = "https://github.com/sanchisivan/ic50-studio",
+                target = "_blank"
+              )
+            ),
+            br(),
+            h4("License"),
+            tags$p("MIT License. You can use, modify, and redistribute the software with attribution. See the LICENSE file in the repository for the full text.")
           )
         )
       )
@@ -2380,6 +2580,7 @@ server <- function(input, output, session) {
           use_log10_axis = input$use_log10_axis,
           extend_curve_toward_zero = input$extend_curve_toward_zero,
           extra_log_decades = input$extra_log_decades,
+          ic50_decimals = input$ic50_decimals,
           progress_callback = function(detail_text, current_step, total_steps) {
             setProgress(
               value = 0.05 + (comparison_end - 0.05) * current_step / max(total_steps, 1),
@@ -2410,6 +2611,7 @@ server <- function(input, output, session) {
           extra_log_decades = input$extra_log_decades,
           uncertainty_method = input$ic50_uncertainty,
           bootstrap_iterations = input$bootstrap_iterations,
+          ic50_decimals = input$ic50_decimals,
           progress_callback = function(detail_text, current_step, total_steps) {
             setProgress(
               value = fit_start + (1 - fit_start) * current_step / max(total_steps, 1),
@@ -2426,10 +2628,15 @@ server <- function(input, output, session) {
   observeEvent(analysis_result(), ignoreInit = TRUE, {
     result_df <- analysis_result()$fit$results
     summary_info <- summarize_analysis_results(result_df)
-    issue_total <- sum(summary_info$counts[names(summary_info$counts) != "Report numeric IC50"])
+    comparison_result <- analysis_result()$comparison
+    issue_total <- sum(summary_info$counts[names(summary_info$counts) != status_report_numeric])
 
-    if (issue_total > 0) {
-      showModal(analysis_summary_modal(summary_info))
+    if (issue_total > 0 || !is.null(comparison_result)) {
+      showModal(analysis_summary_modal(
+        summary_info = summary_info,
+        comparison = comparison_result,
+        selected_model = input$model_equation
+      ))
     } else {
       showNotification(
         "Analysis complete. All fitted groups are currently reportable as numeric IC50 values.",
@@ -2459,9 +2666,24 @@ server <- function(input, output, session) {
   }, res = 130)
 
   output$fit_results_table <- renderDT({
-    result_df <- analysis_result()$fit$results
-    numeric_cols <- vapply(result_df, is.numeric, logical(1))
-    result_df[numeric_cols] <- lapply(result_df[numeric_cols], function(x) round(x, 4))
+    result_df <- refresh_results_display(
+      analysis_result()$fit$results,
+      uncertainty_method = input$ic50_uncertainty,
+      decimals = input$ic50_decimals
+    )
+    result_df$needs_50_crossing_warning <- with(
+      result_df,
+      fit_status == "OK" &
+        grepl("50% not reached", ifelse(is.na(fit_reason), "", fit_reason), fixed = TRUE) &
+        is.finite(ic50)
+    )
+    ic50_numeric_cols <- intersect(
+      c("ic50", "midpoint_parameter", "ic50_sd", "ic50_sem", "ic50_ci95_low", "ic50_ci95_high"),
+      names(result_df)
+    )
+    other_numeric_cols <- setdiff(names(result_df)[vapply(result_df, is.numeric, logical(1))], ic50_numeric_cols)
+    result_df[ic50_numeric_cols] <- lapply(result_df[ic50_numeric_cols], function(x) round(x, input$ic50_decimals))
+    result_df[other_numeric_cols] <- lapply(result_df[other_numeric_cols], function(x) round(x, 4))
 
     display_order <- c(
       "group",
@@ -2503,16 +2725,31 @@ server <- function(input, output, session) {
       target = "row",
       backgroundColor = styleEqual(
         c(
-          "Report numeric IC50",
-          "Do not report numeric IC50 (50% not reached)",
-          "Do not report numeric IC50 (extrapolated)",
-          "Numeric IC50 shown; review fit",
-          "No fit available"
+          status_report_numeric,
+          status_not_reached,
+          status_extrapolated,
+          status_review_fit,
+          status_no_fit
         ),
         c("#eefbf3", "#fff7db", "#fff0d6", "#fdecec", "#f3f4f6")
       )
     )
     dt <- formatStyle(dt, "reporting_status", fontWeight = "700")
+    dt <- formatStyle(
+      dt,
+      "group",
+      valueColumns = "needs_50_crossing_warning",
+      borderLeft = styleEqual(c(TRUE, FALSE), c("6px solid #d97706", "")),
+      fontWeight = styleEqual(c(TRUE, FALSE), c("700", "400"))
+    )
+    dt <- formatStyle(
+      dt,
+      c("ic50", "ic50_reported"),
+      valueColumns = "needs_50_crossing_warning",
+      backgroundColor = styleEqual(c(TRUE, FALSE), c("#fff1c2", "")),
+      color = styleEqual(c(TRUE, FALSE), c("#9a3412", "")),
+      fontWeight = styleEqual(c(TRUE, FALSE), c("700", "400"))
+    )
     dt
   })
 
@@ -2614,7 +2851,12 @@ server <- function(input, output, session) {
       paste0("dose_response_ic50_results_", Sys.Date(), ".csv")
     },
     content = function(file) {
-      utils::write.csv(analysis_result()$fit$results, file, row.names = FALSE)
+      export_df <- refresh_results_display(
+        analysis_result()$fit$results,
+        uncertainty_method = input$ic50_uncertainty,
+        decimals = input$ic50_decimals
+      )
+      utils::write.csv(export_df, file, row.names = FALSE)
     }
   )
 
