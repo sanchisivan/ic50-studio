@@ -3182,16 +3182,134 @@ ui <- fluidPage(
         margin-bottom: 20px;
         backdrop-filter: blur(4px);
       }
-      .app-title {
-        font-size: 34px;
+      .app-brand {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 20px;
+        flex-wrap: wrap;
+        margin-bottom: 18px;
+      }
+      .app-brand-copy {
+        min-width: 260px;
+        flex: 1 1 420px;
+      }
+      .app-eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 12px;
+        border-radius: 999px;
+        background: linear-gradient(135deg, rgba(15, 118, 110, 0.14) 0%, rgba(29, 78, 216, 0.08) 100%);
+        border: 1px solid rgba(15, 118, 110, 0.2);
+        color: #0f766e;
+        font-size: 12px;
         font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 12px;
+      }
+      .app-eyebrow::before {
+        content: '';
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: linear-gradient(180deg, #0f766e 0%, #1d4ed8 100%);
+        box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.08);
+      }
+      .app-title {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .app-title-mark {
+        display: inline-flex;
+        align-items: flex-end;
+        gap: 2px;
+        padding: 8px 14px 10px 14px;
+        border-radius: 16px;
+        background: linear-gradient(135deg, #fffefb 0%, #f3ede3 100%);
+        border: 1px solid #eadfca;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+      }
+      .app-title-ic {
+        font-size: 38px;
+        font-weight: 700;
+        line-height: 1;
         color: #102a43;
-        margin-bottom: 6px;
+        letter-spacing: -0.04em;
+      }
+      .app-title-num {
+        font-size: 22px;
+        font-weight: 700;
+        line-height: 1;
+        color: #0f766e;
+        transform: translateY(6px);
+      }
+      .app-title-word {
+        font-size: 38px;
+        font-weight: 700;
+        line-height: 1;
+        color: #102a43;
+        letter-spacing: -0.04em;
       }
       .app-subtitle {
         color: #52606d;
         font-size: 16px;
-        margin-bottom: 18px;
+        line-height: 1.5;
+        max-width: 760px;
+        margin-bottom: 0;
+      }
+      .app-brand-side {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 170px;
+        flex: 0 0 auto;
+      }
+      .app-brand-card {
+        padding: 12px 16px;
+        border-radius: 18px;
+        background: linear-gradient(145deg, rgba(16, 42, 67, 0.96) 0%, rgba(15, 118, 110, 0.92) 100%);
+        box-shadow: 0 18px 36px rgba(16, 42, 67, 0.18);
+        color: #f8fafc;
+        min-width: 150px;
+      }
+      .app-brand-card-top {
+        font-size: 11px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        opacity: 0.82;
+        margin-bottom: 8px;
+      }
+      .app-brand-card-main {
+        font-family: Georgia, 'Palatino Linotype', serif;
+        font-size: 24px;
+        font-weight: 700;
+        line-height: 1.05;
+      }
+      .app-brand-card-bottom {
+        margin-top: 8px;
+        font-size: 12px;
+        opacity: 0.88;
+      }
+      @media (max-width: 767px) {
+        .app-brand {
+          gap: 14px;
+        }
+        .app-title-ic,
+        .app-title-word {
+          font-size: 31px;
+        }
+        .app-title-num {
+          font-size: 18px;
+        }
+        .app-brand-side {
+          width: 100%;
+          justify-content: flex-start;
+        }
       }
       .sidebar-panel {
         background: linear-gradient(180deg, #fffdfa 0%, #f6efe3 100%);
@@ -3330,10 +3448,35 @@ ui <- fluidPage(
   ),
   div(
     class = "app-shell",
-    div(class = "app-title", "IC50 Studio"),
     div(
-      class = "app-subtitle",
-      "Load dose-response data, fit multiple sigmoid equations, calculate IC50 or EC50 values, and export publication-ready plots in an open workflow."
+      class = "app-brand",
+      div(
+        class = "app-brand-copy",
+        div(class = "app-eyebrow", "Laboratory of Bioactive Peptides"),
+        div(
+          class = "app-title",
+          span(
+            class = "app-title-mark",
+            span(class = "app-title-ic", "IC"),
+            span(class = "app-title-num", "50")
+          ),
+          span(class = "app-title-word", "Studio")
+        ),
+        div(
+          class = "app-subtitle",
+          "Load dose-response data, fit multiple sigmoid equations, calculate IC50 or EC50 values, and export publication-ready plots in an open workflow."
+        )
+      ),
+      div(
+        class = "app-brand-side",
+        div(
+          class = "app-brand-card",
+          div(class = "app-brand-card-top", "Open analysis"),
+          div(class = "app-brand-card-main", "Curves"),
+          div(class = "app-brand-card-main", "and figures"),
+          div(class = "app-brand-card-bottom", "Dose-response and other plots")
+        )
+      )
     ),
     sidebarLayout(
       sidebarPanel(
