@@ -204,6 +204,25 @@ default_y_axis_settings <- function(prepared, fit_data, explicit_breaks, explici
   )
 }
 
+curve_grid_values <- function(x, curve_points, use_log10_axis, extend_curve_toward_zero = FALSE, extra_log_decades = 1) {
+  min_x <- min(x, na.rm = TRUE)
+  max_x <- max(x, na.rm = TRUE)
+
+  if (!isTRUE(extend_curve_toward_zero)) {
+    lower_bound <- min_x
+  } else if (isTRUE(use_log10_axis)) {
+    lower_bound <- max(min_x / (10^max(extra_log_decades, 0)), .Machine$double.eps)
+  } else {
+    lower_bound <- 0
+  }
+
+  if (isTRUE(use_log10_axis)) {
+    return(exp(seq(log(lower_bound), log(max_x), length.out = curve_points)))
+  }
+
+  seq(lower_bound, max_x, length.out = curve_points)
+}
+
 format_axis_labels <- function(x) {
   format(signif(x, 4), trim = TRUE, scientific = FALSE)
 }
@@ -527,7 +546,7 @@ bootstrap_group_data <- function(raw_group_df) {
   out
 }
 
-estimate_ic50_uncertainty <- function(raw_group_df, group_name, fit_to, model, direction, weighting, curve_points, bootstrap_iterations, progress_step = NULL) {
+estimate_ic50_uncertainty <- function(raw_group_df, group_name, fit_to, model, direction, weighting, curve_points, use_log10_axis, extend_curve_toward_zero, extra_log_decades, bootstrap_iterations, progress_step = NULL) {
   if (bootstrap_iterations < 2 || length(unique(raw_group_df$dose)) < 4) {
     return(empty_uncertainty())
   }
@@ -545,7 +564,10 @@ estimate_ic50_uncertainty <- function(raw_group_df, group_name, fit_to, model, d
         model = model,
         direction = direction,
         weighting = weighting,
-        curve_points = curve_points
+        curve_points = curve_points,
+        use_log10_axis = use_log10_axis,
+        extend_curve_toward_zero = extend_curve_toward_zero,
+        extra_log_decades = extra_log_decades
       ),
       silent = TRUE
     )
@@ -687,13 +709,23 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction) {
   )
 }
 
-fit_single_group <- function(df, group_name, model, direction, weighting, curve_points) {
+fit_single_group <- function(df, group_name, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1) {
   if (identical(direction, "Auto-detect")) {
     direction_check <- detect_direction_mismatch(df$dose, df$response, "Increasing")
     candidate_directions <- unique(c(direction_check$expected_direction, "Increasing", "Decreasing"))
     fit_attempts <- lapply(candidate_directions, function(candidate_direction) {
       try(
-        fit_single_group(df, group_name, model, candidate_direction, weighting, curve_points),
+        fit_single_group(
+          df,
+          group_name,
+          model,
+          candidate_direction,
+          weighting,
+          curve_points,
+          use_log10_axis = use_log10_axis,
+          extend_curve_toward_zero = extend_curve_toward_zero,
+          extra_log_decades = extra_log_decades
+        ),
         silent = TRUE
       )
     })
@@ -812,7 +844,13 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
 
   params <- decode_parameters(best_fit$par, model)
   fitted_values <- predict_curve(x, params, model, direction)
-  grid <- exp(seq(log(min(x)), log(max(x)), length.out = curve_points))
+  grid <- curve_grid_values(
+    x = x,
+    curve_points = curve_points,
+    use_log10_axis = use_log10_axis,
+    extend_curve_toward_zero = extend_curve_toward_zero,
+    extra_log_decades = extra_log_decades
+  )
   curve_values <- predict_curve(grid, params, model, direction)
   sse <- sum((y - fitted_values)^2)
   sst <- sum((y - mean(y))^2)
@@ -933,10 +971,36 @@ reporting_status_label <- function(fit_status, fit_reliability) {
     return("Do not report numeric IC50 (extrapolated)")
   }
 
-  "Review fit before reporting"
+  "Numeric IC50 shown; review fit"
 }
 
-fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_points, uncertainty_method = "None", bootstrap_iterations = 200, progress_callback = NULL) {
+reporting_note_label <- function(fit_status, fit_reliability, ic50_interpretation, fit_warning) {
+  if (!identical(fit_status, "OK")) {
+    return(fit_status)
+  }
+
+  if (identical(fit_reliability, "Reliable")) {
+    return("")
+  }
+
+  if (identical(fit_reliability, "Observed range does not cross 50%") &&
+      nzchar(ic50_interpretation %||% "")) {
+    return(ic50_interpretation)
+  }
+
+  if (identical(fit_reliability, "IC50 outside tested range") &&
+      nzchar(ic50_interpretation %||% "")) {
+    return(ic50_interpretation)
+  }
+
+  if (identical(fit_reliability, "Unreliable fit")) {
+    return("Numeric IC50 shown, but inspect the fit before reporting it.")
+  }
+
+  fit_warning %||% ""
+}
+
+fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, uncertainty_method = "None", bootstrap_iterations = 200, progress_callback = NULL) {
   fit_source <- if (identical(fit_to, "Group means")) prepared$summary else prepared$raw
   split_groups <- split(fit_source, fit_source$group)
   diagnostics_df <- group_diagnostics(fit_source)
@@ -979,7 +1043,10 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
         model = model,
         direction = direction,
         weighting = weighting,
-        curve_points = curve_points
+        curve_points = curve_points,
+        use_log10_axis = use_log10_axis,
+        extend_curve_toward_zero = extend_curve_toward_zero,
+        extra_log_decades = extra_log_decades
       ),
       error = function(e) {
         list(
@@ -1008,6 +1075,9 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
         direction = direction,
         weighting = weighting,
         curve_points = curve_points,
+        use_log10_axis = use_log10_axis,
+        extend_curve_toward_zero = extend_curve_toward_zero,
+        extra_log_decades = extra_log_decades,
         bootstrap_iterations = bootstrap_iterations,
         progress_step = step_progress
       )
@@ -1029,12 +1099,6 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
         uncertainty_values = empty_uncertainty()
       )
     }
-
-    if (fits[[group_name]]$result_row$fit_status[1] == "OK" &&
-        fits[[group_name]]$result_row$fit_reliability[1] != "Reliable" &&
-        nzchar(fits[[group_name]]$result_row$ic50_interpretation[1])) {
-      fits[[group_name]]$result_row$ic50_reported <- fits[[group_name]]$result_row$ic50_interpretation[1]
-    }
   }
 
   results_df <- do.call(rbind, lapply(fits, `[[`, "result_row"))
@@ -1045,6 +1109,26 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
     function(i) reporting_status_label(results_df$fit_status[i], results_df$fit_reliability[i]),
     character(1)
   )
+  results_df$reporting_note <- vapply(
+    seq_len(nrow(results_df)),
+    function(i) reporting_note_label(
+      fit_status = results_df$fit_status[i],
+      fit_reliability = results_df$fit_reliability[i],
+      ic50_interpretation = results_df$ic50_interpretation[i],
+      fit_warning = results_df$fit_warning[i]
+    ),
+    character(1)
+  )
+  missing_display_mask <- results_df$fit_status == "OK" &
+    (is.na(results_df$ic50_reported) | !nzchar(trimws(results_df$ic50_reported))) &
+    is.finite(results_df$ic50)
+  if (any(missing_display_mask)) {
+    results_df$ic50_reported[missing_display_mask] <- vapply(
+      results_df$ic50[missing_display_mask],
+      format_signif_text,
+      character(1)
+    )
+  }
   has_fit <- any(results_df$fit_status == "OK")
   invalid_groups <- diagnostics_df[!diagnostics_df$can_fit, , drop = FALSE]
   fit_messages <- character()
@@ -1109,7 +1193,7 @@ model_parameter_count <- function(model) {
   )
 }
 
-compare_models <- function(prepared, fit_to, direction, weighting, curve_points, progress_callback = NULL) {
+compare_models <- function(prepared, fit_to, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, progress_callback = NULL) {
   model_fits <- vector("list", length(all_model_choices))
   names(model_fits) <- all_model_choices
 
@@ -1125,6 +1209,9 @@ compare_models <- function(prepared, fit_to, direction, weighting, curve_points,
       direction = direction,
       weighting = weighting,
       curve_points = curve_points,
+      use_log10_axis = use_log10_axis,
+      extend_curve_toward_zero = extend_curve_toward_zero,
+      extra_log_decades = extra_log_decades,
       uncertainty_method = "None",
       bootstrap_iterations = 20,
       progress_callback = function(detail_text, current_step, total_step_count) {
@@ -1832,6 +1919,8 @@ ui <- fluidPage(
             selected = "Journal inhibitor"
           ),
           checkboxInput("use_log10_axis", "Use log10 concentration axis", value = TRUE),
+          checkboxInput("extend_curve_toward_zero", "Extend fitted curve toward zero-dose baseline", value = FALSE),
+          numericInput("extra_log_decades", "Extra log10 decades below the minimum dose", value = 1, min = 0, max = 4, step = 0.25),
           checkboxInput("show_ic50_guides", "Show IC50 guide lines", value = TRUE),
           checkboxInput("show_half_max_line", "Show 50% reference line", value = TRUE)
         ),
@@ -1955,6 +2044,7 @@ ui <- fluidPage(
             tags$p("If you are not sure which equation to use, enable model comparison first. The app will suggest a model based on how many groups give reportable IC50 values and how well the curves fit."),
             tags$p("Once you choose the model, run the final fit again with bootstrap uncertainty if you want 95% CI, SD, or SEM."),
             tags$p("Use the plot controls only after the fitting looks right. Styling should be the last step, not the first."),
+            tags$p("If you want the displayed sigmoid to continue toward the zero-dose baseline even when you did not measure a zero point, turn on 'Extend fitted curve toward zero-dose baseline'."),
             br(),
             h4("Data format"),
             tags$p("Supported files: CSV, TSV, TXT, XLS, XLSX."),
@@ -1985,6 +2075,7 @@ ui <- fluidPage(
             tags$p("If the fit looks flat or wrong, first check the selected group column and curve direction."),
             tags$p("If the app reports that 50% was not reached, expand the concentration range instead of forcing a numeric IC50."),
             tags$p("For enzyme inhibition-style figures, use Response transform = 'Invert as 100 - response', Increasing direction, and a 0 to 100 y-axis."),
+            tags$p("On log-scale plots, the zero-dose extension works by drawing the curve for extra log10 decades below the minimum observed concentration, because zero itself cannot be shown on a log axis."),
             h4("Example layout"),
             DTOutput("example_table")
           )
@@ -2105,6 +2196,9 @@ server <- function(input, output, session) {
           direction = input$direction,
           weighting = input$weighting,
           curve_points = input$curve_points,
+          use_log10_axis = input$use_log10_axis,
+          extend_curve_toward_zero = input$extend_curve_toward_zero,
+          extra_log_decades = input$extra_log_decades,
           progress_callback = function(detail_text, current_step, total_steps) {
             setProgress(
               value = 0.05 + (comparison_end - 0.05) * current_step / max(total_steps, 1),
@@ -2130,6 +2224,9 @@ server <- function(input, output, session) {
           direction = input$direction,
           weighting = input$weighting,
           curve_points = input$curve_points,
+          use_log10_axis = input$use_log10_axis,
+          extend_curve_toward_zero = input$extend_curve_toward_zero,
+          extra_log_decades = input$extra_log_decades,
           uncertainty_method = input$ic50_uncertainty,
           bootstrap_iterations = input$bootstrap_iterations,
           progress_callback = function(detail_text, current_step, total_steps) {
@@ -2173,8 +2270,10 @@ server <- function(input, output, session) {
       "group",
       "model",
       "direction",
+      "ic50",
       "ic50_reported",
       "reporting_status",
+      "reporting_note",
       "fit_reliability",
       "suggested_direction",
       "r_squared",
@@ -2210,7 +2309,7 @@ server <- function(input, output, session) {
           "Report numeric IC50",
           "Do not report numeric IC50 (50% not reached)",
           "Do not report numeric IC50 (extrapolated)",
-          "Review fit before reporting",
+          "Numeric IC50 shown; review fit",
           "No fit available"
         ),
         c("#eefbf3", "#fff7db", "#fff0d6", "#fdecec", "#f3f4f6")
