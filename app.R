@@ -2039,6 +2039,37 @@ analysis_summary_modal <- function(summary_info, comparison = NULL, selected_mod
   )
 }
 
+plotmath_examples_modal <- function() {
+  modalDialog(
+    title = "Plotmath Examples",
+    easyClose = TRUE,
+    size = "l",
+    footer = modalButton("Close"),
+    tags$p("Use plotmath only when you need formatted scientific text. Start the field with plotmath:, then write the expression."),
+    tags$p("Useful operators:"),
+    tags$ul(
+      tags$li(tags$code("[ ]"), " for subscripts"),
+      tags$li(tags$code("^"), " for superscripts"),
+      tags$li(tags$code("~"), " for spaces"),
+      tags$li(tags$code("*"), " to join parts without extra space"),
+      tags$li(tags$code("%.%"), " for a centered dot"),
+      tags$li("Put normal text in double quotes, for example ", tags$code("\"concentration\""), ".")
+    ),
+    tags$hr(),
+    tags$p(tags$strong("Ready-to-use examples")),
+    tags$ul(
+      tags$li(tags$code('plotmath: IC[50]')),
+      tags$li(tags$code('plotmath: IC[50]~"(uM)"')),
+      tags$li(tags$code('plotmath: NO[3]^"-"')),
+      tags$li(tags$code('plotmath: log[10]~"concentration"')),
+      tags$li(tags$code('plotmath: C[protein]~"(mg/mL)"')),
+      tags$li(tags$code('plotmath: plain(Log)[10]~plain(Concentration)~"["*mu*"g" %.% plain(mL)^-1*"]"'))
+    ),
+    tags$p("The last example is useful when one title needs normal words, a subscript, the Greek mu symbol, a centered dot, and a superscript in the same expression."),
+    tags$p("These examples work for main plot axis titles, legend titles, and the Other Plots axis titles.")
+  )
+}
+
 fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, uncertainty_method = "None", bootstrap_iterations = 200, ic50_decimals = 2, potency_metric = "IC50", progress_callback = NULL) {
   fit_source <- if (identical(fit_to, "Group means")) prepared$fit_summary else prepared$fit_raw
   split_groups <- split(fit_source, fit_source$group)
@@ -3619,6 +3650,22 @@ ui <- fluidPage(
         color: #7a4f28;
         border-color: #c9b18a;
       }
+      .subtle-inline-button {
+        padding: 0 !important;
+        margin: 2px 0 0 0;
+        border: none !important;
+        background: transparent !important;
+        color: #8b5e34 !important;
+        font-weight: 700;
+        text-decoration: underline;
+        box-shadow: none !important;
+      }
+      .subtle-inline-button:hover,
+      .subtle-inline-button:focus {
+        background: transparent !important;
+        color: #6f4824 !important;
+        text-decoration: underline;
+      }
       .form-control, .selectize-input {
         border-radius: 12px !important;
         border-color: #d8c8ad;
@@ -3785,6 +3832,11 @@ ui <- fluidPage(
           textInput("x_axis_title", "X-axis title", value = ""),
           textInput("y_axis_title", "Y-axis title", value = ""),
           helpText("Use plotmath: for formatted titles. Subscript example: plotmath: IC[50]~\"(uM)\". Superscript example: plotmath: NO[3]^\"-\"."),
+          div(
+            class = "help-block",
+            actionButton("show_plotmath_examples", "Show plotmath examples", class = "subtle-inline-button"),
+            tags$span(" for axis titles, legend titles, and Other Plots axis titles.")
+          ),
           selectInput(
             "plot_style",
             "Plot style",
@@ -4400,6 +4452,10 @@ server <- function(input, output, session) {
         duration = 5
       )
     }
+  })
+
+  observeEvent(input$show_plotmath_examples, {
+    showModal(plotmath_examples_modal())
   })
 
   output$data_notes <- renderText({
