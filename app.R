@@ -2634,13 +2634,32 @@ resolve_legend_title <- function(show_title, custom_title, default_title = "Seri
   default_title
 }
 
+resolve_plotmath_label <- function(label_text) {
+  trimmed <- trimws(label_text %||% "")
+  if (!nzchar(trimmed)) {
+    return(NULL)
+  }
+
+  if (!grepl("^plotmath\\s*:", trimmed, ignore.case = TRUE)) {
+    return(trimmed)
+  }
+
+  expression_text <- trimws(sub("^plotmath\\s*:", "", trimmed, ignore.case = TRUE))
+  parsed <- try(parse(text = expression_text), silent = TRUE)
+  if (inherits(parsed, "try-error") || !length(parsed)) {
+    return(expression_text)
+  }
+
+  parsed[[1]]
+}
+
 build_plot <- function(prepared, fit_data, input) {
   groups <- unique(prepared$raw$group)
   palette_values <- publication_palette(length(groups), input$palette_name)
   names(palette_values) <- groups
   shape_values <- publication_shapes(length(groups))
   names(shape_values) <- groups
-  legend_name <- resolve_legend_title(input$show_legend_title, input$legend_title, "Series")
+  legend_name <- resolve_plotmath_label(resolve_legend_title(input$show_legend_title, input$legend_title, "Series"))
   legend_labels <- format_legend_labels(groups, input$legend_label_decimals %||% 2)
   show_point_legend <- !identical(input$legend_content, "Lines only")
   show_line_legend <- !identical(input$legend_content, "Points only")
@@ -2662,9 +2681,13 @@ build_plot <- function(prepared, fit_data, input) {
   y_breaks <- y_axis_settings$breaks
   y_limits <- y_axis_settings$limits
 
-  x_label <- if (nzchar(trimws(input$x_axis_title))) trimws(input$x_axis_title) else (input$dose_col %||% "Dose")
+  x_label <- if (nzchar(trimws(input$x_axis_title))) {
+    resolve_plotmath_label(input$x_axis_title)
+  } else {
+    input$dose_col %||% "Dose"
+  }
   y_label <- if (nzchar(trimws(input$y_axis_title))) {
-    trimws(input$y_axis_title)
+    resolve_plotmath_label(input$y_axis_title)
   } else if (identical(input$response_transform, "Invert as 100 - response")) {
     "Inhibition (%)"
   } else if (identical(input$normalization, "Raw values")) {
@@ -2852,7 +2875,7 @@ build_bioassay_plot <- function(prepared, input) {
   names(palette_values) <- series_levels
   legend_labels <- format_legend_labels(series_levels, input$legend_label_decimals %||% 2)
   legend_name <- if (has_series) {
-    resolve_legend_title(input$show_legend_title, input$legend_title, prepared$series_label)
+    resolve_plotmath_label(resolve_legend_title(input$show_legend_title, input$legend_title, prepared$series_label))
   } else {
     NULL
   }
@@ -2867,13 +2890,13 @@ build_bioassay_plot <- function(prepared, input) {
   }
 
   x_label <- if (nzchar(trimws(input$bioassay_x_axis_title))) {
-    trimws(input$bioassay_x_axis_title)
+    resolve_plotmath_label(input$bioassay_x_axis_title)
   } else {
     prepared$x_label
   }
 
   y_label <- if (nzchar(trimws(input$bioassay_y_axis_title))) {
-    trimws(input$bioassay_y_axis_title)
+    resolve_plotmath_label(input$bioassay_y_axis_title)
   } else {
     prepared$y_label
   }
@@ -3759,6 +3782,7 @@ ui <- fluidPage(
           br(),
           textInput("x_axis_title", "X-axis title", value = ""),
           textInput("y_axis_title", "Y-axis title", value = ""),
+          helpText("For subscripts or superscripts, prefix the title with plotmath:. Example: plotmath: IC[50]~\"(uM)\""),
           selectInput(
             "plot_style",
             "Plot style",
@@ -3794,7 +3818,8 @@ ui <- fluidPage(
             condition = "input.show_legend_title",
             textInput("legend_title", "Legend title", value = ""),
             numericInput("legend_title_size", "Legend title size", value = 12, min = 8, max = 30, step = 1),
-            helpText("Leave the legend title blank to use the default mapped label for the current plot.")
+            helpText("Leave the legend title blank to use the default mapped label for the current plot."),
+            helpText("You can also use plotmath:, for example: plotmath: NO^-\"3\" or plotmath: IC[50]")
           ),
           numericInput("legend_label_decimals", "Legend numeric decimals", value = 2, min = 0, max = 8, step = 1),
           helpText("Legend numeric decimals apply only when the legend entries are numeric, such as concentrations."),
@@ -3872,6 +3897,7 @@ ui <- fluidPage(
           checkboxInput("show_bioassay_title", "Show other-plot title", value = FALSE),
           textInput("bioassay_x_axis_title", "Other plot x-axis title", value = ""),
           textInput("bioassay_y_axis_title", "Other plot y-axis title", value = ""),
+          helpText("Other-plot axis titles also support plotmath:, for example: plotmath: C[protein]~\"(mg/mL)\""),
           helpText("For inhibitor-style grouped bars like the example image, map X = compound or peptide, Y = response, Series = concentration, and either choose an annotation column or turn on automatic significance letters.")
         ),
         tags$details(
