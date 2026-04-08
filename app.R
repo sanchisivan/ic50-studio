@@ -33,6 +33,7 @@ all_model_choices <- c(
   "3PL (Top = 100)"
 )
 manual_control_normalization <- "Normalize using manual 0% and 100% controls"
+minimum_bootstrap_iterations <- 20L
 
 sample_dataset <- function() {
   data.frame(
@@ -150,7 +151,7 @@ parse_numeric_values <- function(text) {
     return(NULL)
   }
 
-  parts <- unlist(strsplit(cleaned, "[,;\\s]+"))
+  parts <- unlist(strsplit(cleaned, "[,;[:space:]]+"))
   parts <- parts[nzchar(parts)]
   values <- suppressWarnings(as.numeric(parts))
 
@@ -250,7 +251,15 @@ format_decimal_text <- function(x, decimals = 2) {
 }
 
 format_decimal_compact <- function(x, decimals = 2) {
-  formatted <- ifelse(is.finite(x), formatC(x, format = "f", digits = decimals), NA_character_)
+  if (!length(x)) {
+    return(character())
+  }
+
+  formatted <- rep(NA_character_, length(x))
+  finite_mask <- is.finite(x)
+  if (any(finite_mask)) {
+    formatted[finite_mask] <- formatC(x[finite_mask], format = "f", digits = decimals)
+  }
   formatted <- sub("0+$", "", formatted)
   formatted <- sub("[.]$", "", formatted)
   formatted
@@ -324,18 +333,32 @@ join_reason_flags <- function(...) {
 }
 
 compute_summary <- function(df) {
-  mean_df <- aggregate(response ~ group + dose, df, mean)
-  sd_df <- aggregate(
-    response ~ group + dose,
-    df,
-    function(x) if (length(x) > 1) stats::sd(x) else NA_real_
-  )
-  n_df <- aggregate(response ~ group + dose, df, length)
+  if (!nrow(df)) {
+    return(data.frame(
+      group = character(),
+      dose = numeric(),
+      response = numeric(),
+      response_sd = numeric(),
+      n = integer(),
+      stringsAsFactors = FALSE
+    ))
+  }
 
-  merged <- merge(mean_df, sd_df, by = c("group", "dose"), suffixes = c("", "_sd"))
-  merged <- merge(merged, n_df, by = c("group", "dose"))
-  names(merged) <- c("group", "dose", "response", "response_sd", "n")
-  merged[order(merged$group, merged$dose), ]
+  split_rows <- split(df, interaction(df$group, df$dose, drop = TRUE, lex.order = TRUE))
+  summary_list <- lapply(split_rows, function(piece) {
+    data.frame(
+      group = as.character(piece$group[1]),
+      dose = piece$dose[1],
+      response = mean(piece$response),
+      response_sd = if (nrow(piece) > 1) stats::sd(piece$response) else NA_real_,
+      n = nrow(piece),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  merged <- do.call(rbind, summary_list)
+  rownames(merged) <- NULL
+  merged[order(merged$group, merged$dose), , drop = FALSE]
 }
 
 group_diagnostics <- function(df) {
@@ -388,11 +411,28 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
   }
 
   split_groups <- split(df, df$group)
-  normalized_groups <- lapply(split_groups, function(piece) {
+  norm_results <- lapply(split_groups, function(piece) {
+    flat_normalized <- FALSE
+    if (!identical(normalization, "Raw values") &&
+        !identical(normalization, manual_control_normalization)) {
+      response_span <- max(piece$response, na.rm = TRUE) - min(piece$response, na.rm = TRUE)
+      flat_normalized <- !is.finite(response_span) || response_span <= 0
+    }
     piece$response <- normalize_vector(piece$response, normalization, control_100 = control_100, control_0 = control_0)
     piece$response <- transform_response_vector(piece$response, response_transform)
-    piece
+    list(
+      piece = piece,
+      flat_normalized = flat_normalized,
+      group = as.character(piece$group[1])
+    )
   })
+  flat_normalized_groups <- vapply(
+    norm_results,
+    function(result) if (isTRUE(result$flat_normalized)) result$group else "",
+    character(1)
+  )
+  flat_normalized_groups <- flat_normalized_groups[nzchar(flat_normalized_groups)]
+  normalized_groups <- lapply(norm_results, `[[`, "piece")
   df <- do.call(rbind, normalized_groups)
   rownames(df) <- NULL
 
@@ -437,6 +477,16 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
         "Manual control normalization: 100%% control = %s, 0%% control = %s. Formula used: 100 * (Y - control_0) / (control_100 - control_0).",
         format_decimal_text(control_100, 4),
         format_decimal_text(control_0, 4)
+      )
+    )
+  }
+
+  if (length(flat_normalized_groups)) {
+    notes <- c(
+      notes,
+      sprintf(
+        "Flat-response groups were scaled to 50 for min/max normalization: %s.",
+        paste(sort(unique(flat_normalized_groups)), collapse = ", ")
       )
     )
   }
@@ -839,12 +889,14 @@ compact_letters_from_significance <- function(significant_matrix, group_scores =
       }
 
       for (col_index in rev(split_cols)) {
-        col_i <- letter_matrix[, col_index]
-        col_j <- letter_matrix[, col_index]
-        col_i[i] <- FALSE
-        col_j[j] <- FALSE
-        letter_matrix[, col_index] <- col_i
-        letter_matrix <- cbind(letter_matrix, col_j)
+        # Duplicate the shared letter column so each significant group drops out of
+        # a different copy while the remaining groups keep their assignments.
+        split_i_col <- letter_matrix[, col_index]
+        split_j_col <- letter_matrix[, col_index]
+        split_i_col[i] <- FALSE
+        split_j_col[j] <- FALSE
+        letter_matrix[, col_index] <- split_i_col
+        letter_matrix <- cbind(letter_matrix, split_j_col)
       }
 
       letter_matrix <- absorb_letter_matrix(letter_matrix)
@@ -870,6 +922,23 @@ compact_letters_from_significance <- function(significant_matrix, group_scores =
 
   group_letters[group_letters == ""] <- NA_character_
   setNames(group_letters, group_names)
+}
+
+split_tukey_comparison_name <- function(comparison_name, group_levels) {
+  comparison_parts <- strsplit(comparison_name, "-", fixed = TRUE)[[1]]
+  if (length(comparison_parts) < 2) {
+    return(NULL)
+  }
+
+  for (split_index in seq_len(length(comparison_parts) - 1)) {
+    group_high <- paste(comparison_parts[seq_len(split_index)], collapse = "-")
+    group_low <- paste(comparison_parts[(split_index + 1):length(comparison_parts)], collapse = "-")
+    if (group_high %in% group_levels && group_low %in% group_levels) {
+      return(c(group_high, group_low))
+    }
+  }
+
+  NULL
 }
 
 symmetrize_pairwise_p <- function(lower_matrix, group_levels) {
@@ -927,8 +996,8 @@ compute_pairwise_p_matrix <- function(values, groups, method_name, alpha = 0.05)
     diag(p_matrix) <- 1
 
     for (comparison_name in rownames(tukey_table)) {
-      comparison_parts <- strsplit(comparison_name, "-", fixed = TRUE)[[1]]
-      if (length(comparison_parts) != 2) {
+      comparison_parts <- split_tukey_comparison_name(comparison_name, group_levels)
+      if (is.null(comparison_parts) || length(comparison_parts) != 2) {
         next
       }
 
@@ -1173,82 +1242,30 @@ predict_curve <- function(dose, params, model, direction) {
 }
 
 decode_parameters <- function(theta, model) {
-  index <- 1
-
-  if (identical(model, "4PL")) {
-    bottom <- theta[index]
-    index <- index + 1
-    top <- bottom + exp(theta[index])
-    index <- index + 1
-    ic50_param <- exp(theta[index])
-    index <- index + 1
-    hill <- exp(theta[index])
-    list(
-      bottom = bottom,
-      top = top,
-      ic50_param = ic50_param,
-      hill = hill,
-      asymmetry = 1
-    )
-  } else if (identical(model, "5PL")) {
-    bottom <- theta[index]
-    index <- index + 1
-    top <- bottom + exp(theta[index])
-    index <- index + 1
-    ic50_param <- exp(theta[index])
-    index <- index + 1
-    hill <- exp(theta[index])
-    index <- index + 1
-    asymmetry <- exp(theta[index])
-    list(
-      bottom = bottom,
-      top = top,
-      ic50_param = ic50_param,
-      hill = hill,
-      asymmetry = asymmetry
-    )
-  } else if (identical(model, "3PL (Hill fixed = 1)")) {
-    bottom <- theta[index]
-    index <- index + 1
-    top <- bottom + exp(theta[index])
-    index <- index + 1
-    ic50_param <- exp(theta[index])
-    list(
-      bottom = bottom,
-      top = top,
-      ic50_param = ic50_param,
-      hill = 1,
-      asymmetry = 1
-    )
-  } else if (identical(model, "3PL (Bottom = 0)")) {
-    top <- exp(theta[index])
-    index <- index + 1
-    ic50_param <- exp(theta[index])
-    index <- index + 1
-    hill <- exp(theta[index])
-    list(
-      bottom = 0,
-      top = top,
-      ic50_param = ic50_param,
-      hill = hill,
-      asymmetry = 1
-    )
-  } else if (identical(model, "3PL (Top = 100)")) {
-    bottom <- theta[index]
-    index <- index + 1
-    ic50_param <- exp(theta[index])
-    index <- index + 1
-    hill <- exp(theta[index])
-    list(
-      bottom = bottom,
-      top = 100,
-      ic50_param = ic50_param,
-      hill = hill,
-      asymmetry = 1
-    )
-  } else {
+  layout <- switch(
+    model,
+    "4PL" = c("bottom", "delta_top", "ic50", "hill"),
+    "5PL" = c("bottom", "delta_top", "ic50", "hill", "asymmetry"),
+    "3PL (Hill fixed = 1)" = c("bottom", "delta_top", "ic50"),
+    "3PL (Bottom = 0)" = c("top", "ic50", "hill"),
+    "3PL (Top = 100)" = c("bottom", "ic50", "hill"),
     stop("Unknown model selected.")
-  }
+  )
+  values <- stats::setNames(as.list(theta), layout)
+
+  bottom <- if ("bottom" %in% names(values)) values$bottom else 0
+  top <- if ("top" %in% names(values)) exp(values$top) else bottom + exp(values$delta_top)
+  ic50_param <- exp(values$ic50)
+  hill <- if ("hill" %in% names(values)) exp(values$hill) else 1
+  asymmetry <- if ("asymmetry" %in% names(values)) exp(values$asymmetry) else 1
+
+  list(
+    bottom = bottom,
+    top = top,
+    ic50_param = ic50_param,
+    hill = hill,
+    asymmetry = asymmetry
+  )
 }
 
 encode_parameters <- function(bottom, top, ic50_param, hill, asymmetry, model) {
@@ -1257,55 +1274,45 @@ encode_parameters <- function(bottom, top, ic50_param, hill, asymmetry, model) {
   safe_ic50 <- max(ic50_param, .Machine$double.eps)
   safe_hill <- max(hill, 0.05)
   safe_asymmetry <- max(asymmetry, 0.2)
+  capped_bottom <- min(safe_bottom, 99.999)
 
-  if (identical(model, "4PL")) {
-    return(c(
-      safe_bottom,
-      log(max(safe_top - safe_bottom, 1e-6)),
-      log(safe_ic50),
-      log(safe_hill)
-    ))
-  }
+  values <- switch(
+    model,
+    "4PL" = c(
+      bottom = safe_bottom,
+      delta_top = log(max(safe_top - safe_bottom, 1e-6)),
+      ic50 = log(safe_ic50),
+      hill = log(safe_hill)
+    ),
+    "5PL" = c(
+      bottom = safe_bottom,
+      delta_top = log(max(safe_top - safe_bottom, 1e-6)),
+      ic50 = log(safe_ic50),
+      hill = log(safe_hill),
+      asymmetry = log(safe_asymmetry)
+    ),
+    "3PL (Hill fixed = 1)" = c(
+      bottom = safe_bottom,
+      delta_top = log(max(safe_top - safe_bottom, 1e-6)),
+      ic50 = log(safe_ic50)
+    ),
+    "3PL (Bottom = 0)" = c(
+      top = log(max(safe_top, 1e-6)),
+      ic50 = log(safe_ic50),
+      hill = log(safe_hill)
+    ),
+    "3PL (Top = 100)" = c(
+      bottom = capped_bottom,
+      ic50 = log(safe_ic50),
+      hill = log(safe_hill)
+    ),
+    stop("Unknown model selected.")
+  )
 
-  if (identical(model, "5PL")) {
-    return(c(
-      safe_bottom,
-      log(max(safe_top - safe_bottom, 1e-6)),
-      log(safe_ic50),
-      log(safe_hill),
-      log(safe_asymmetry)
-    ))
-  }
-
-  if (identical(model, "3PL (Hill fixed = 1)")) {
-    return(c(
-      safe_bottom,
-      log(max(safe_top - safe_bottom, 1e-6)),
-      log(safe_ic50)
-    ))
-  }
-
-  if (identical(model, "3PL (Bottom = 0)")) {
-    return(c(
-      log(max(safe_top, 1e-6)),
-      log(safe_ic50),
-      log(safe_hill)
-    ))
-  }
-
-  if (identical(model, "3PL (Top = 100)")) {
-    capped_bottom <- min(safe_bottom, 99.999)
-    return(c(
-      capped_bottom,
-      log(safe_ic50),
-      log(safe_hill)
-    ))
-  }
-
-  stop("Unknown model selected.")
+  unname(values)
 }
 
-compute_half_max_ic50 <- function(params, model, direction, observed_dose, potency_metric = "IC50") {
+compute_half_max_ic50 <- function(params, model, direction, observed_dose, potency_metric = "IC50", curve_points = 500) {
   target_response <- potency_target_response(params, potency_metric)
   search_dose <- c(observed_dose, params$ic50_param)
   search_dose <- search_dose[is.finite(search_dose) & search_dose > 0]
@@ -1316,7 +1323,12 @@ compute_half_max_ic50 <- function(params, model, direction, observed_dose, poten
     predict_curve(10^log_dose, params, model, direction) - target_response
   }
 
-  grid <- seq(lower, upper, length.out = 500)
+  curve_points_value <- suppressWarnings(as.integer(curve_points))
+  if (!is.finite(curve_points_value) || curve_points_value < 2) {
+    curve_points_value <- 500L
+  }
+
+  grid <- seq(lower, upper, length.out = max(500L, curve_points_value))
   values <- vapply(grid, response_gap, numeric(1))
   change_points <- which(diff(sign(values)) != 0)
 
@@ -1356,7 +1368,7 @@ bootstrap_group_data <- function(raw_group_df) {
 }
 
 estimate_ic50_uncertainty <- function(raw_group_df, group_name, fit_to, model, direction, weighting, curve_points, use_log10_axis, extend_curve_toward_zero, extra_log_decades, bootstrap_iterations, ic50_decimals = 2, potency_metric = "IC50", progress_step = NULL) {
-  if (bootstrap_iterations < 2 || length(unique(raw_group_df$dose)) < 4) {
+  if (bootstrap_iterations < minimum_bootstrap_iterations || length(unique(raw_group_df$dose)) < 4) {
     return(empty_uncertainty())
   }
 
@@ -1463,7 +1475,7 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction, ic50_deci
   crosses_50_observed <- observed_min <= target_response && observed_max >= target_response
 
   interpretation <- if (is.finite(ic50_value)) format_decimal_text(ic50_value, ic50_decimals) else NA_character_
-  reliability <- "Reliable"
+  reliability <- reliability_reliable
   warning_text <- ""
   reason_flags <- character(0)
 
@@ -1482,7 +1494,7 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction, ic50_deci
   }
 
   if (is.finite(ic50_value) && (ic50_value < min_dose || ic50_value > max_dose)) {
-    if (identical(reliability, "Reliable")) {
+    if (identical(reliability, reliability_reliable)) {
       reliability <- reliability_extrapolated
       interpretation <- paste0("Extrapolated (", format_decimal_text(ic50_value, ic50_decimals), ")")
     }
@@ -1496,25 +1508,25 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction, ic50_deci
   observed_span <- observed_max - observed_min
   fitted_span <- params$top - params$bottom
   if (!is.finite(fitted_span) || fitted_span <= 0) {
-    reliability <- "Unreliable fit"
+    reliability <- reliability_unreliable
     reason_flags <- c(reason_flags, "Flat or invalid fitted range")
     warning_text <- join_messages(warning_text, "The fitted curve collapsed to a flat or invalid response range.")
   }
 
   if (is.finite(params$bottom) && params$bottom < observed_min - 25) {
-    reliability <- "Unreliable fit"
+    reliability <- reliability_unreliable
     reason_flags <- c(reason_flags, "Bottom far below data")
     warning_text <- join_messages(warning_text, "The fitted bottom is far below the observed data.")
   }
 
   if (is.finite(params$top) && params$top > observed_max + max(25, 0.35 * max(observed_span, 1))) {
-    reliability <- "Unreliable fit"
+    reliability <- reliability_unreliable
     reason_flags <- c(reason_flags, "Top far above data")
     warning_text <- join_messages(warning_text, "The fitted top is far above the observed data.")
   }
 
-  if (identical(reliability, "Unreliable fit") && !grepl("not reached|Extrapolated", interpretation %||% "", ignore.case = TRUE)) {
-    interpretation <- "Review fit before reporting"
+  if (identical(reliability, reliability_unreliable) && !grepl("not reached|Extrapolated", interpretation %||% "", ignore.case = TRUE)) {
+    interpretation <- interpretation_review_fit
   }
 
   list(
@@ -1678,7 +1690,14 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
   sse <- sum((y - fitted_values)^2)
   sst <- sum((y - mean(y))^2)
   r_squared <- if (sst > 0) 1 - sse / sst else NA_real_
-  half_max_ic50 <- compute_half_max_ic50(params, model, direction, x, potency_metric = potency_metric)
+  half_max_ic50 <- compute_half_max_ic50(
+    params,
+    model,
+    direction,
+    x,
+    potency_metric = potency_metric,
+    curve_points = curve_points
+  )
   direction_check <- detect_direction_mismatch(x, y, direction)
   reliability <- assess_ic50_reliability(df, params, half_max_ic50, direction, ic50_decimals = ic50_decimals, potency_metric = potency_metric)
   fit_warning <- reliability$warning_text
@@ -1786,15 +1805,18 @@ status_not_reached <- "Do not report numeric value (target not reached)"
 status_extrapolated <- "Do not report numeric value (extrapolated)"
 status_review_fit <- "Numeric value shown; review fit"
 status_no_fit <- "No fit available"
+reliability_reliable <- "Reliable"
+reliability_unreliable <- "Unreliable fit"
 reliability_target_not_reached <- "Target response not reached"
 reliability_extrapolated <- "Value outside tested range"
+interpretation_review_fit <- "Review fit before reporting"
 
 reporting_status_label <- function(fit_status, fit_reliability) {
   if (!identical(fit_status, "OK")) {
     return(status_no_fit)
   }
 
-  if (identical(fit_reliability, "Reliable")) {
+  if (identical(fit_reliability, reliability_reliable)) {
     return(status_report_numeric)
   }
 
@@ -1814,7 +1836,7 @@ reporting_note_label <- function(fit_status, fit_reliability, ic50_interpretatio
     return(fit_status)
   }
 
-  if (identical(fit_reliability, "Reliable")) {
+  if (identical(fit_reliability, reliability_reliable)) {
     return("")
   }
 
@@ -1828,7 +1850,7 @@ reporting_note_label <- function(fit_status, fit_reliability, ic50_interpretatio
     return(ic50_interpretation)
   }
 
-  if (identical(fit_reliability, "Unreliable fit")) {
+  if (identical(fit_reliability, reliability_unreliable)) {
     return("Numeric IC50 shown, but inspect the fit before reporting it.")
   }
 
@@ -3628,7 +3650,7 @@ ui <- fluidPage(
         ),
         tags$details(
           class = "well",
-          open = NA,
+          open = TRUE,
           tags$summary("Data and mapping"),
           br(),
           fileInput("data_file", "Upload data", accept = c(".csv", ".tsv", ".txt", ".xls", ".xlsx")),
@@ -3639,7 +3661,7 @@ ui <- fluidPage(
         ),
         tags$details(
           class = "well",
-          open = NA,
+          open = TRUE,
           tags$summary("Analysis settings"),
           br(),
           selectInput(
@@ -3709,7 +3731,7 @@ ui <- fluidPage(
             selected = "None"
           ),
           numericInput("ic50_decimals", "Potency decimal places", value = 2, min = 0, max = 8, step = 1),
-          numericInput("bootstrap_iterations", "Bootstrap iterations", value = 50, min = 20, max = 2000, step = 10),
+          numericInput("bootstrap_iterations", "Bootstrap iterations", value = 50, min = minimum_bootstrap_iterations, max = 2000, step = 10),
           helpText("Use 100 to 200 bootstrap iterations for publication-oriented potency uncertainty. Reported potency values and \u00b1 uncertainty use the same number of decimals."),
           numericInput("curve_points", "Curve resolution", value = 250, min = 100, max = 1000, step = 50)
         ),
@@ -3866,6 +3888,7 @@ ui <- fluidPage(
           tags$summary("Export settings (all plots)"),
           br(),
           textInput("export_filename", "Export file name", value = "dose_response_curve"),
+          textInput("bioassay_export_filename", "Other-plot export file name", value = "other_plot"),
           selectInput("export_format", "Export format", choices = c("PNG", "TIFF", "PDF", "SVG"), selected = "PNG"),
           selectInput("export_units", "Export units", choices = c("in", "cm", "mm"), selected = "in"),
           numericInput("export_width", "Export width", value = 7, min = 3, max = 20, step = 0.5),
@@ -4327,9 +4350,10 @@ server <- function(input, output, session) {
   }, ignoreNULL = FALSE)
 
   observeEvent(analysis_result(), ignoreInit = TRUE, {
-    result_df <- analysis_result()$fit$results
+    result <- analysis_result()
+    result_df <- result$fit$results
     summary_info <- summarize_analysis_results(result_df)
-    comparison_result <- analysis_result()$comparison
+    comparison_result <- result$comparison
     issue_total <- sum(summary_info$counts[names(summary_info$counts) != status_report_numeric])
 
     if (issue_total > 0 || !is.null(comparison_result)) {
@@ -4349,13 +4373,14 @@ server <- function(input, output, session) {
   })
 
   output$data_notes <- renderText({
+    result <- analysis_result()
     comparison_note <- NULL
-    if (!is.null(analysis_result()$comparison)) {
-      comparison_note <- analysis_result()$comparison$recommendation_text
+    if (!is.null(result$comparison)) {
+      comparison_note <- result$comparison$recommendation_text
     }
 
-    note_parts <- c(analysis_result()$prepared$notes, analysis_result()$fit$message, comparison_note)
-    if (isTRUE(input$use_log10_axis) && isTRUE(analysis_result()$prepared$zero_dose_rows > 0)) {
+    note_parts <- c(result$prepared$notes, result$fit$message, comparison_note)
+    if (isTRUE(input$use_log10_axis) && isTRUE(result$prepared$zero_dose_rows > 0)) {
       note_parts <- c(
         note_parts,
         "Zero-dose rows are kept in the dataset preview but are excluded from fitting and are not shown on the log10 x-axis."
@@ -4385,7 +4410,8 @@ server <- function(input, output, session) {
   })
 
   output$dose_plot <- renderPlot({
-    build_plot(analysis_result()$prepared, analysis_result()$fit, input)
+    result <- analysis_result()
+    build_plot(result$prepared, result$fit, input)
   }, res = 130)
 
   output$bioassay_plot <- renderPlot({
@@ -4393,8 +4419,9 @@ server <- function(input, output, session) {
   }, res = 130)
 
   output$fit_results_table <- renderDT({
+    result <- analysis_result()
     result_df <- refresh_results_display(
-      analysis_result()$fit$results,
+      result$fit$results,
       uncertainty_method = input$ic50_uncertainty,
       decimals = input$ic50_decimals,
       potency_metric = input$potency_metric
@@ -4486,7 +4513,8 @@ server <- function(input, output, session) {
   })
 
   output$model_comparison_summary <- renderUI({
-    comparison <- analysis_result()$comparison
+    result <- analysis_result()
+    comparison <- result$comparison
 
     if (is.null(comparison)) {
       return(tags$p("Turn on 'Compare all models first (no bootstrap)' and click Run analysis to benchmark the equations before choosing one for bootstrap uncertainty."))
@@ -4499,7 +4527,8 @@ server <- function(input, output, session) {
   })
 
   output$apply_suggested_model_ui <- renderUI({
-    comparison <- analysis_result()$comparison
+    result <- analysis_result()
+    comparison <- result$comparison
     if (is.null(comparison) || !nzchar(comparison$recommended_model %||% "")) {
       return(NULL)
     }
@@ -4512,13 +4541,15 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$apply_suggested_model, {
-    comparison <- analysis_result()$comparison
+    result <- analysis_result()
+    comparison <- result$comparison
     req(comparison$recommended_model)
     updateSelectInput(session, "model_equation", selected = comparison$recommended_model)
   })
 
   output$model_comparison_table <- renderDT({
-    comparison <- analysis_result()$comparison
+    result <- analysis_result()
+    comparison <- result$comparison
 
     if (is.null(comparison)) {
       return(datatable(
@@ -4563,8 +4594,9 @@ server <- function(input, output, session) {
   })
 
   output$summary_data_table <- renderDT({
+    result <- analysis_result()
     datatable(
-      analysis_result()$prepared$summary,
+      result$prepared$summary,
       rownames = FALSE,
       options = list(pageLength = 8, scrollX = TRUE)
     )
@@ -4595,8 +4627,9 @@ server <- function(input, output, session) {
       paste0("dose_response_", potency_metric_lower(input$potency_metric), "_results_", Sys.Date(), ".csv")
     },
     content = function(file) {
+      result <- analysis_result()
       export_df <- refresh_results_display(
-        analysis_result()$fit$results,
+        result$fit$results,
         uncertainty_method = input$ic50_uncertainty,
         decimals = input$ic50_decimals,
         potency_metric = input$potency_metric
@@ -4615,9 +4648,10 @@ server <- function(input, output, session) {
       paste0(base_name, ".", plot_export_extension(input$export_format))
     },
     content = function(file) {
+      result <- analysis_result()
       ggplot2::ggsave(
         filename = file,
-        plot = build_plot(analysis_result()$prepared, analysis_result()$fit, input),
+        plot = build_plot(result$prepared, result$fit, input),
         device = plot_export_device(input$export_format),
         width = input$export_width,
         height = input$export_height,
@@ -4630,11 +4664,9 @@ server <- function(input, output, session) {
 
   output$download_bioassay_plot <- downloadHandler(
     filename = function() {
-      base_name <- trimws(input$export_filename)
+      base_name <- trimws(input$bioassay_export_filename)
       if (!nzchar(base_name)) {
         base_name <- paste0("other_plot_", Sys.Date())
-      } else {
-        base_name <- paste0(base_name, "_other_plot")
       }
       paste0(base_name, ".", plot_export_extension(input$export_format))
     },
