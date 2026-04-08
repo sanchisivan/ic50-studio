@@ -21,6 +21,7 @@ If you only want the short version, read [README.md](README.md). If you want the
 13. [Troubleshooting](#13-troubleshooting)
 14. [Good-practice checklist](#14-good-practice-checklist)
 15. [Contact and license](#15-contact-and-license)
+16. [References](#16-references)
 
 ## 1. What the app does
 
@@ -619,15 +620,15 @@ Controls how many points are used to draw the fitted curve. Higher values make t
 
 ### Hill equation and Hill coefficient
 
-The supported curve equations in IC50 Studio are Hill-type logistic models. In this family of models, the midpoint parameter controls where the transition happens on the dose axis, while the Hill coefficient controls how steeply the curve changes around that midpoint.
+The supported curve equations in IC50 Studio are Hill-type logistic models (Hill, 1910; Weiss, 1997; Goutelle et al., 2008). In this family of models, the midpoint parameter controls where the transition happens on the dose axis, while the Hill coefficient controls how steeply the curve changes around that midpoint.
 
 Practical interpretation:
 
 - a larger Hill slope gives a sharper transition
 - a smaller Hill slope gives a broader transition
-- in real bioassays, the Hill coefficient is usually best treated as a descriptive steepness term, not as a literal count of binding sites
+- in real bioassays, the Hill coefficient is usually best treated as a descriptive steepness term, not as a literal count of binding sites (Weiss, 1997; Sebaugh, 2011)
 
-For classic inhibitor workflows, the Hill framework is useful because it provides a stable empirical way to summarize potency and response shape even when the full biochemical mechanism is more complicated than a single-site binding scheme.
+For classic inhibitor workflows, the Hill framework is useful because it provides a stable empirical way to summarize potency and response shape even when the full biochemical mechanism is more complicated than a single-site binding scheme. For a modern general overview of linear and nonlinear regression in quantitative bioassays, see Jarantow et al. (2023).
 
 ### Quick comparison
 
@@ -652,6 +653,8 @@ Why it is the usual default:
 - it is flexible enough for most datasets without adding an asymmetry parameter that may be poorly constrained
 - it is usually the safest first model for enzyme inhibitor IC50 analysis unless the data clearly show reproducible asymmetry
 
+This is the standard practical starting point in many assay-analysis guides and ligand-binding workflows (Sebaugh, 2011; Xiang et al., 2018). Recent assay papers still use `4PL` as a routine calibration model, including competitive ELISA validation work (Garg et al., 2022). A recent protocol on generating drug-resistant cell lines also treats `4PL` as a suitable default for `IC50` estimation when the full sigmoid is represented by the data (Kadomoto et al., 2025).
+
 ### `5PL`
 
 Useful when:
@@ -670,6 +673,8 @@ Why and when to use it:
 - this is especially useful when the assay response is systematically skewed rather than symmetric
 - the scientific support for `5PL` is strongest in asymmetric assay settings such as immunoassay calibration and other bioassays with visibly skewed sigmoids
 
+Methodological work comparing `4PL` and `5PL` shows that the extra asymmetry parameter is useful when asymmetry is real, but it is not automatically better in every dataset because the bias-variance tradeoff can still favor `4PL` in some situations (Gottschalk and Dunn, 2005; Cumberland et al., 2015). More recent assay-oriented examples include asymmetric immunoassay design work (Hyun et al., 2020) and quantitative ELISA studies that explicitly use `5PL` standard curves (Vernet et al., 2021; Carducci et al., 2024).
+
 For enzyme inhibitors:
 
 - `5PL` can still be useful if your inhibitor curve is clearly asymmetric and that pattern is reproducible across repeats or related compounds
@@ -685,6 +690,8 @@ Useful when:
 - you prefer a fixed slope for consistency across groups
 - the data do not justify a fully flexible Hill slope
 
+Reduced-parameter sigmoid models are most useful when the data do not support a fully unconstrained fit or when you want a more stable comparison across related groups (Sebaugh, 2011). In practical assay work, reduced-parameter fits are commonly recommended when a full sigmoid is not obtained or when some curve features should be constrained rather than estimated freely (Kadomoto et al., 2025).
+
 ### `3PL (Bottom = 0)`
 
 Useful when:
@@ -692,12 +699,16 @@ Useful when:
 - the response should approach zero at one end
 - the biology strongly supports a zero baseline
 
+This is best treated as a constrained pragmatic fit, not a separate mechanistic model. It is most appropriate when the lower plateau is known from the assay design or normalization scheme rather than weakly inferred from sparse data (Sebaugh, 2011; Kadomoto et al., 2025).
+
 ### `3PL (Top = 100)`
 
 Useful when:
 
 - the response should approach 100 at one end
 - you are working on a normalized percent-like scale with a meaningful upper bound
+
+As with `3PL (Bottom = 0)`, this is a constrained practical model. It is most useful when the upper plateau really is anchored by assay design, control-based normalization, or a clear biological maximum rather than only by wishful interpretation of the fitted curve (Sebaugh, 2011; Kadomoto et al., 2025).
 
 ### Practical model choice advice
 
@@ -715,47 +726,7 @@ What to look for when deciding between `4PL` and `5PL`:
 - do not choose `5PL` only because it gives a slightly better `R-squared`
 - be cautious with `5PL` when you have few concentration levels or weak coverage of one plateau
 
-### Scientific references for model choice
-
-These references are a good starting point if you want the scientific background behind the app's model guidance:
-
-- Hill AV. *The possible effects of the aggregation of the molecules of haemoglobin on its dissociation curves*. J Physiol. 1910;40:iv-vii.
-- Weiss JN. *The Hill equation revisited: uses and misuses*. FASEB J. 1997;11(11):835-841. [PubMed](https://pubmed.ncbi.nlm.nih.gov/9285481/)
-- Goutelle S, Maurin M, Rougier F, Barbaut X, Bourguignon L, Ducher M, Maire P. *The Hill equation: a review of its capabilities in pharmacological modelling*. Fundam Clin Pharmacol. 2008;22(6):633-648. [DOI](https://doi.org/10.1111/j.1472-8206.2008.00633.x)
-- Cheng Y, Prusoff WH. *Relationship between the inhibition constant (Ki) and the concentration of inhibitor which causes 50 per cent inhibition (I50) of an enzymatic reaction*. Biochem Pharmacol. 1973;22(23):3099-3108. [DOI](https://doi.org/10.1016/0006-2952(73)90196-2)
-- Gottschalk PG, Dunn JR. *The five-parameter logistic: a characterization and comparison with the four-parameter logistic*. Anal Biochem. 2005;343(1):54-65. [PubMed](https://pubmed.ncbi.nlm.nih.gov/15953581/)
-- Sebaugh JL. *Guidelines for accurate EC50/IC50 estimation*. Pharm Stat. 2011;10(2):128-134. [PubMed](https://pubmed.ncbi.nlm.nih.gov/22328315/)
-- Cumberland WG, Xu X, Breitbart E, Parvin CA. *Nonlinear calibration model choice between the four and five-parameter logistic models*. J Biopharm Stat. 2015;25(5):972-983. [PubMed](https://pubmed.ncbi.nlm.nih.gov/24918306/)
-- Xiang Y, Donley J, Seletskaia E, Shingare S, Kamerud J, Gorovits B. *A Simple Approach to Determine a Curve Fitting Model with a Correct Weighting Function for Calibration Curves in Quantitative Ligand Binding Assays*. AAPS J. 2018;20(3):45. [PubMed](https://pubmed.ncbi.nlm.nih.gov/29536273/)
-- Jarantow SW, Pisors ED, Chiu ML. *Introduction to the Use of Linear and Nonlinear Regression Analysis in Quantitative Biological Assays*. Curr Protoc. 2023;3(6):e801. [PubMed](https://pubmed.ncbi.nlm.nih.gov/37358238/)
-
-### Recent assay examples by model
-
-The papers below are useful when you want recent examples of how these models are applied in real assay workflows, not only the classic methodological papers.
-
-#### Recent `5PL` examples
-
-- Carducci M, Massai L, Lari E, et al. *Qualification of an enzyme-linked immunosorbent assay for quantification of anti-Vi IgG in human sera*. Front Immunol. 2024. [PubMed](https://pubmed.ncbi.nlm.nih.gov/39478859/) This paper explicitly reports `5PL` interpolation for the ELISA standard curve.
-- Vernet R, Charrier E, Grogg J, Mach N. *A Quantitative ELISA Protocol for Detection of Specific Human IgG against the SARS-CoV-2 Spike Protein*. Vaccines (Basel). 2021;9(7):770. [PubMed](https://pubmed.ncbi.nlm.nih.gov/34358186/) Figure 1 explicitly shows a `5 Parameter Logistic (5PL)` curve.
-- Hyun SW, Wong WK, Yang Y. *Optimal designs for asymmetric sigmoidal response curves in bioassays and immunoassays*. Stat Methods Med Res. 2020;29(2):421-436. [PubMed](https://pubmed.ncbi.nlm.nih.gov/30868935/) This is a strong recent methodological citation for `5PL` in asymmetric assay settings.
-
-#### Recent `4PL` examples
-
-- Garg K, Villavicencio-Aguilar F, Solano-Rivera F, Gilbert L. *Analytical Validation of a Direct Competitive ELISA for Multiple Mycotoxin Detection in Human Serum*. Toxins (Basel). 2022;14(11):727. [PubMed](https://pubmed.ncbi.nlm.nih.gov/36355977/) Practical ELISA validation example using `4PL` calibration.
-- Xiang Y, Donley J, Seletskaia E, Shingare S, Kamerud J, Gorovits B. *A Simple Approach to Determine a Curve Fitting Model with a Correct Weighting Function for Calibration Curves in Quantitative Ligand Binding Assays*. AAPS J. 2018;20(3):45. [PubMed](https://pubmed.ncbi.nlm.nih.gov/29536273/) Practical ligand-binding assay paper discussing both `4PL` and `5PL` model selection.
-- *Development of Drug-resistant Cell Lines for Experimental Procedures*. 2024. [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC12404681/) This protocol notes that `4PL` is often suitable for `IC50` estimation when the full sigmoidal curve is represented.
-
-#### Constrained `3PL` and reduced-parameter examples
-
-- *Development of Drug-resistant Cell Lines for Experimental Procedures*. 2024. [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC12404681/) This protocol explicitly recommends `2- or 3-parameter` fitting with fixed minimum and maximum values when a full sigmoid is not obtained.
-- Akhtar MJ, Ahamed M, Alhadlaq H. *Bismuth Oxide (Bi2O3) Nanoparticles Cause Selective Toxicity in a Human Endothelial (HUVE) Cell Line Compared to Epithelial Cells*. Toxics (Basel). 2023;11(4):343. [DOI](https://doi.org/10.3390/toxics11040343) Example of `IC50` estimation performed with a three-parameter mode.
-
-How to use these examples:
-
-- use `4PL` as the default when the curve looks reasonably symmetric and both plateaus are represented
-- consider `5PL` when the skew is reproducible and biologically plausible, especially in immunoassay-like calibration settings
-- use constrained `3PL` variants when you have a strong biological reason to fix one plateau or when the data do not support a fully unconstrained sigmoid
-- avoid choosing a more complex model only because it gives a slightly better fit metric
+Choosing between `4PL` and `5PL` should not rely only on a slightly better fit statistic, because `5PL` can lose robustness when asymmetry is weak or the data are too sparse to support the extra parameter (Cumberland et al., 2015). Full article details for the citations used in this section are listed in Section 16.
 
 ## 8. Understanding the output tabs
 
@@ -1369,6 +1340,10 @@ Recommended settings:
 - `Potency metric = IC50`
 - `Potency uncertainty = None` for the first pass
 
+Interpretation note:
+
+- for mechanistic enzyme-inhibitor interpretation, remember that the fitted `IC50` is assay-dependent and is not automatically the same as `Ki` (Cheng and Prusoff, 1973)
+
 Then:
 
 1. run the analysis
@@ -1564,3 +1539,33 @@ Santa Fe, Argentina
 Repository: [github.com/sanchisivan/ic50-studio](https://github.com/sanchisivan/ic50-studio)
 
 IC50 Studio is distributed under the MIT License. See [LICENSE](LICENSE) for the full license text.
+
+## 16. References
+
+Carducci M, Massai L, Lari E, Semplici B, Aruta MG, De Simone D, Piu P, Montomoli E, Berlanda Scorza F, Grappi S, Iturriza-Gómara M, Canals R, Rondini S, Rossi O. Qualification of an enzyme-linked immunosorbent assay for quantification of anti-Vi IgG in human sera. Front Immunol. 2024;15:1466869. [PubMed](https://pubmed.ncbi.nlm.nih.gov/39478859/)
+
+Cheng Y, Prusoff WH. Relationship between the inhibition constant (Ki) and the concentration of inhibitor which causes 50 per cent inhibition (I50) of an enzymatic reaction. Biochem Pharmacol. 1973;22(23):3099-3108. [DOI](https://doi.org/10.1016/0006-2952(73)90196-2)
+
+Cumberland WG, Xu X, Breitbart E, Parvin CA. Nonlinear calibration model choice between the four and five-parameter logistic models. J Biopharm Stat. 2015;25(5):972-983. [PubMed](https://pubmed.ncbi.nlm.nih.gov/24918306/)
+
+Gottschalk PG, Dunn JR. The five-parameter logistic: a characterization and comparison with the four-parameter logistic. Anal Biochem. 2005;343(1):54-65. [PubMed](https://pubmed.ncbi.nlm.nih.gov/15953581/)
+
+Garg K, Villavicencio-Aguilar F, Solano-Rivera F, Gilbert L. Analytical Validation of a Direct Competitive ELISA for Multiple Mycotoxin Detection in Human Serum. Toxins (Basel). 2022;14(11):727. [PubMed](https://pubmed.ncbi.nlm.nih.gov/36355977/)
+
+Goutelle S, Maurin M, Rougier F, Barbaut X, Bourguignon L, Ducher M, Maire P. The Hill equation: a review of its capabilities in pharmacological modelling. Fundam Clin Pharmacol. 2008;22(6):633-648. [DOI](https://doi.org/10.1111/j.1472-8206.2008.00633.x)
+
+Hill AV. The possible effects of the aggregation of the molecules of haemoglobin on its dissociation curves. J Physiol. 1910;40:iv-vii.
+
+Hyun SW, Wong WK, Yang Y. Optimal designs for asymmetric sigmoidal response curves in bioassays and immunoassays. Stat Methods Med Res. 2020;29(2):421-436. [Publisher](https://journals.sagepub.com/doi/full/10.1177/0962280219832631)
+
+Jarantow SW, Pisors ED, Chiu ML. Introduction to the Use of Linear and Nonlinear Regression Analysis in Quantitative Biological Assays. Curr Protoc. 2023;3(6):e801. [PubMed](https://pubmed.ncbi.nlm.nih.gov/37358238/)
+
+Kadomoto S, Shelley G, Mizokami A, Keller ET. Development of Drug-resistant Cell Lines for Experimental Procedures. J Vis Exp. 2025;(222):e68957. [PubMed](https://pubmed.ncbi.nlm.nih.gov/40889269/)
+
+Sebaugh JL. Guidelines for accurate EC50/IC50 estimation. Pharm Stat. 2011;10(2):128-134. [PubMed](https://pubmed.ncbi.nlm.nih.gov/22328315/)
+
+Vernet R, Charrier E, Grogg J, Mach N. A Quantitative ELISA Protocol for Detection of Specific Human IgG against the SARS-CoV-2 Spike Protein. Vaccines (Basel). 2021;9(7):770. [PubMed](https://pubmed.ncbi.nlm.nih.gov/34358186/)
+
+Weiss JN. The Hill equation revisited: uses and misuses. FASEB J. 1997;11(11):835-841. [PubMed](https://pubmed.ncbi.nlm.nih.gov/9285481/)
+
+Xiang Y, Donley J, Seletskaia E, Shingare S, Kamerud J, Gorovits B. A Simple Approach to Determine a Curve Fitting Model with a Correct Weighting Function for Calibration Curves in Quantitative Ligand Binding Assays. AAPS J. 2018;20(3):45. [PubMed](https://pubmed.ncbi.nlm.nih.gov/29536273/)
