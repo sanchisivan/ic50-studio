@@ -79,6 +79,18 @@ An example file is included at [example_dose_response.csv](example_dose_response
 - If you switch to `All observations`, the app resets weighting to `None`.
 - `95% CI`, `+/- SD`, and `+/- SEM` are bootstrap-based uncertainty estimates for the fitted potency value.
 
+## Choosing a dose-response model
+
+| Model | Parameters | Typical use | Main caution |
+|---|---|---|---|
+| `4PL` | bottom, top, midpoint, Hill slope | Best general starting point for inhibitor, viability, and activation-style curves | Assumes a symmetric sigmoid around the midpoint |
+| `5PL` | bottom, top, midpoint, Hill slope, asymmetry | Useful for clearly asymmetric curves, especially in immunoassay-style calibration or other skewed bioassays | Easier to overfit when there are few concentrations or weak plateau coverage |
+| `3PL (Hill fixed = 1)` | bottom, top, midpoint | Simple Langmuir-like shape when you want a fixed slope across groups | Can miss genuinely steep or shallow transitions |
+| `3PL (Bottom = 0)` | top, midpoint, Hill slope | Useful when the biology strongly supports a true zero baseline | Wrong if the lower plateau is not actually near zero |
+| `3PL (Top = 100)` | bottom, midpoint, Hill slope | Useful for well-normalized percent-response assays with a meaningful 100% upper bound | Wrong if the upper plateau is not truly constrained to 100 |
+
+See [USER_MANUAL.md](USER_MANUAL.md) for detailed model explanations, Hill-slope interpretation, and scientific references.
+
 ## Other Plots module
 
 Use the `Other Plots` tab for figures that are common in inhibitor, hemolysis, viability, or other bioassay workflows.
