@@ -2645,6 +2645,8 @@ resolve_plotmath_label <- function(label_text) {
   }
 
   expression_text <- trimws(sub("^plotmath\\s*:", "", trimmed, ignore.case = TRUE))
+  # Be forgiving when users paste examples that contain backslash-escaped quotes.
+  expression_text <- gsub("\\\\([\"'])", "\\1", expression_text, perl = TRUE)
   parsed <- try(parse(text = expression_text), silent = TRUE)
   if (inherits(parsed, "try-error") || !length(parsed)) {
     return(expression_text)
@@ -3782,7 +3784,7 @@ ui <- fluidPage(
           br(),
           textInput("x_axis_title", "X-axis title", value = ""),
           textInput("y_axis_title", "Y-axis title", value = ""),
-          helpText("For subscripts or superscripts, prefix the title with plotmath:. Example: plotmath: IC[50]~\"(uM)\""),
+          helpText("Use plotmath: for formatted titles. Subscript example: plotmath: IC[50]~\"(uM)\". Superscript example: plotmath: NO[3]^\"-\"."),
           selectInput(
             "plot_style",
             "Plot style",
@@ -3819,7 +3821,7 @@ ui <- fluidPage(
             textInput("legend_title", "Legend title", value = ""),
             numericInput("legend_title_size", "Legend title size", value = 12, min = 8, max = 30, step = 1),
             helpText("Leave the legend title blank to use the default mapped label for the current plot."),
-            helpText("You can also use plotmath:, for example: plotmath: NO^-\"3\" or plotmath: IC[50]")
+            helpText("You can also use plotmath:. Subscript example: plotmath: IC[50]. Superscript example: plotmath: NO[3]^\"-\".")
           ),
           numericInput("legend_label_decimals", "Legend numeric decimals", value = 2, min = 0, max = 8, step = 1),
           helpText("Legend numeric decimals apply only when the legend entries are numeric, such as concentrations."),
@@ -3897,7 +3899,7 @@ ui <- fluidPage(
           checkboxInput("show_bioassay_title", "Show other-plot title", value = FALSE),
           textInput("bioassay_x_axis_title", "Other plot x-axis title", value = ""),
           textInput("bioassay_y_axis_title", "Other plot y-axis title", value = ""),
-          helpText("Other-plot axis titles also support plotmath:, for example: plotmath: C[protein]~\"(mg/mL)\""),
+          helpText("Other-plot axis titles also support plotmath:. Subscript example: plotmath: C[protein]~\"(mg/mL)\". Superscript example: plotmath: NO[3]^\"-\"."),
           helpText("For inhibitor-style grouped bars like the example image, map X = compound or peptide, Y = response, Series = concentration, and either choose an annotation column or turn on automatic significance letters.")
         ),
         tags$details(
