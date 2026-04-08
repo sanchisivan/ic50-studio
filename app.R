@@ -2055,6 +2055,13 @@ plotmath_examples_modal <- function() {
       tags$li(tags$code("%.%"), " for a centered dot"),
       tags$li("Put normal text in double quotes, for example ", tags$code("\"concentration\""), ".")
     ),
+    tags$div(
+      class = "analysis-summary-tip",
+      tags$strong("Important limitation: "),
+      "R plotmath does not fully bold symbol-font items such as ",
+      tags$code("mu"),
+      " or some numeric math pieces. If you need everything fully bold, enter the title as plain Unicode text instead of plotmath."
+    ),
     tags$hr(),
     tags$p(tags$strong("Ready-to-use examples")),
     tags$ul(
@@ -2064,6 +2071,12 @@ plotmath_examples_modal <- function() {
       tags$li(tags$code('plotmath: log[10]~"concentration"')),
       tags$li(tags$code('plotmath: C[protein]~"(mg/mL)"')),
       tags$li(tags$code('plotmath: plain(Log)[10]~plain(Concentration)~"["*mu*"g" %.% plain(mL)^-1*"]"'))
+    ),
+    tags$p(tags$strong("Fully bold Unicode alternative")),
+    tags$ul(
+      tags$li(tags$code("Log\u2081\u2080 Concentration [\u03bcg\u00b7mL\u207b\u00b9]")),
+      tags$li(tags$code("IC\u2085\u2080 (\u03bcM)")),
+      tags$li(tags$code("NO\u2083\u207b"))
     ),
     tags$p("The last example is useful when one title needs normal words, a subscript, the Greek mu symbol, a centered dot, and a superscript in the same expression."),
     tags$p("These examples work for main plot axis titles, legend titles, and the Other Plots axis titles.")
@@ -2470,6 +2483,29 @@ publication_shapes <- function(n) {
   rep(c(16, 15, 17, 25, 18, 19, 0, 1, 2, 5), length.out = n)
 }
 
+single_point_shape_choices <- function() {
+  c(
+    "Filled circle" = "16",
+    "Open circle" = "1",
+    "Filled square" = "15",
+    "Open square" = "0",
+    "Filled triangle" = "17",
+    "Open triangle" = "2",
+    "Filled diamond" = "18",
+    "Open diamond" = "5",
+    "Plus" = "3",
+    "Cross" = "4"
+  )
+}
+
+resolve_single_point_shape <- function(shape_value) {
+  parsed_shape <- suppressWarnings(as.integer(shape_value %||% "16"))
+  if (!is.finite(parsed_shape)) {
+    return(16L)
+  }
+  parsed_shape
+}
+
 resolve_plot_fill <- function(background_fill) {
   switch(
     background_fill,
@@ -2488,13 +2524,14 @@ resolve_panel_fill <- function(background_fill) {
   )
 }
 
-publication_theme <- function(style_name, base_size, legend_position, background_fill, grid_mode = "Match style", legend_title_size = NULL) {
+publication_theme <- function(style_name, base_size, legend_position, background_fill, grid_mode = "Match style", legend_title_size = NULL, plain_text = FALSE) {
   panel_fill <- resolve_panel_fill(background_fill)
   plot_fill <- resolve_plot_fill(background_fill)
   legend_fill <- plot_fill
   if (is.null(legend_title_size) || !is.finite(legend_title_size)) {
     legend_title_size <- base_size
   }
+  title_face <- if (isTRUE(plain_text)) "plain" else "bold"
 
   base_theme <- switch(
     style_name,
@@ -2506,20 +2543,24 @@ publication_theme <- function(style_name, base_size, legend_position, background
 
   themed <- base_theme +
     theme(
-      plot.title = element_text(face = "bold", size = base_size + 6, colour = "#111827"),
+      plot.title = element_text(face = title_face, size = base_size + 6, colour = "#111827"),
       plot.subtitle = element_text(colour = "#4b5563", size = base_size),
       legend.position = tolower(legend_position),
-      legend.title = element_text(face = "bold", size = legend_title_size),
+      legend.title = element_text(face = title_face, size = legend_title_size),
       legend.background = element_rect(fill = legend_fill, colour = NA),
       legend.box.background = element_rect(fill = legend_fill, colour = NA),
       legend.key = element_rect(fill = legend_fill, colour = NA),
-      axis.title = element_text(face = "bold"),
+      axis.title = element_text(face = title_face),
       panel.grid.minor = element_blank(),
       panel.background = element_rect(fill = panel_fill, colour = NA),
       plot.background = element_rect(fill = plot_fill, colour = NA),
       strip.background = element_rect(fill = panel_fill, colour = "#111111"),
-      strip.text = element_text(face = "bold")
+      strip.text = element_text(face = title_face)
     )
+
+  if (isTRUE(plain_text)) {
+    themed <- themed + theme(text = element_text(face = "plain"))
+  }
 
   if (identical(style_name, "Publication boxed")) {
     themed <- themed +
@@ -2665,7 +2706,7 @@ resolve_legend_title <- function(show_title, custom_title, default_title = "Seri
   default_title
 }
 
-resolve_plotmath_label <- function(label_text) {
+resolve_plotmath_label <- function(label_text, force_bold = FALSE) {
   trimmed <- trimws(label_text %||% "")
   if (!nzchar(trimmed)) {
     return(NULL)
@@ -2678,12 +2719,22 @@ resolve_plotmath_label <- function(label_text) {
   expression_text <- trimws(sub("^plotmath\\s*:", "", trimmed, ignore.case = TRUE))
   # Be forgiving when users paste examples that contain backslash-escaped quotes.
   expression_text <- gsub("\\\\([\"'])", "\\1", expression_text, perl = TRUE)
+  if (isTRUE(force_bold)) {
+    # In plotmath, plain() explicitly drops the bold face, so rewrite it when we
+    # want title-style bold labels by default.
+    expression_text <- gsub("\\bplain\\s*\\(", "bold(", expression_text, perl = TRUE)
+  }
   parsed <- try(parse(text = expression_text), silent = TRUE)
   if (inherits(parsed, "try-error") || !length(parsed)) {
     return(expression_text)
   }
 
-  parsed[[1]]
+  label_expr <- parsed[[1]]
+  if (isTRUE(force_bold)) {
+    label_expr <- as.call(list(as.name("bold"), label_expr))
+  }
+
+  label_expr
 }
 
 build_plot <- function(prepared, fit_data, input) {
@@ -2692,7 +2743,11 @@ build_plot <- function(prepared, fit_data, input) {
   names(palette_values) <- groups
   shape_values <- publication_shapes(length(groups))
   names(shape_values) <- groups
-  legend_name <- resolve_plotmath_label(resolve_legend_title(input$show_legend_title, input$legend_title, "Series"))
+  single_shape_value <- resolve_single_point_shape(input$single_point_shape)
+  legend_name <- resolve_plotmath_label(
+    resolve_legend_title(input$show_legend_title, input$legend_title, "Series"),
+    force_bold = !isTRUE(input$plain_plot_text)
+  )
   legend_labels <- format_legend_labels(groups, input$legend_label_decimals %||% 2)
   show_point_legend <- !identical(input$legend_content, "Lines only")
   show_line_legend <- !identical(input$legend_content, "Points only")
@@ -2715,12 +2770,12 @@ build_plot <- function(prepared, fit_data, input) {
   y_limits <- y_axis_settings$limits
 
   x_label <- if (nzchar(trimws(input$x_axis_title))) {
-    resolve_plotmath_label(input$x_axis_title)
+    resolve_plotmath_label(input$x_axis_title, force_bold = !isTRUE(input$plain_plot_text))
   } else {
     input$dose_col %||% "Dose"
   }
   y_label <- if (nzchar(trimws(input$y_axis_title))) {
-    resolve_plotmath_label(input$y_axis_title)
+    resolve_plotmath_label(input$y_axis_title, force_bold = !isTRUE(input$plain_plot_text))
   } else if (identical(input$response_transform, "Invert as 100 - response")) {
     "Inhibition (%)"
   } else if (identical(input$normalization, "Raw values")) {
@@ -2753,6 +2808,7 @@ build_plot <- function(prepared, fit_data, input) {
         data = plot_raw_df,
         aes(x = dose, y = response, color = group),
         alpha = 0.45,
+        shape = single_shape_value,
         size = input$point_size * 0.8,
         show.legend = FALSE
       )
@@ -2793,6 +2849,7 @@ build_plot <- function(prepared, fit_data, input) {
       geom_point(
         data = plot_summary_df,
         aes(x = dose, y = response, color = group),
+        shape = single_shape_value,
         size = input$point_size,
         stroke = 0.8,
         show.legend = show_point_legend
@@ -2844,7 +2901,8 @@ build_plot <- function(prepared, fit_data, input) {
       legend_position = input$legend_position,
       background_fill = input$background_fill,
       grid_mode = input$plot_grid_mode,
-      legend_title_size = input$legend_title_size
+      legend_title_size = input$legend_title_size,
+      plain_text = input$plain_plot_text
     )
 
   if (isTRUE(input$use_group_shapes)) {
@@ -2908,7 +2966,10 @@ build_bioassay_plot <- function(prepared, input) {
   names(palette_values) <- series_levels
   legend_labels <- format_legend_labels(series_levels, input$legend_label_decimals %||% 2)
   legend_name <- if (has_series) {
-    resolve_plotmath_label(resolve_legend_title(input$show_legend_title, input$legend_title, prepared$series_label))
+    resolve_plotmath_label(
+      resolve_legend_title(input$show_legend_title, input$legend_title, prepared$series_label),
+      force_bold = !isTRUE(input$plain_plot_text)
+    )
   } else {
     NULL
   }
@@ -2923,16 +2984,18 @@ build_bioassay_plot <- function(prepared, input) {
   }
 
   x_label <- if (nzchar(trimws(input$bioassay_x_axis_title))) {
-    resolve_plotmath_label(input$bioassay_x_axis_title)
+    resolve_plotmath_label(input$bioassay_x_axis_title, force_bold = !isTRUE(input$plain_plot_text))
   } else {
     prepared$x_label
   }
 
   y_label <- if (nzchar(trimws(input$bioassay_y_axis_title))) {
-    resolve_plotmath_label(input$bioassay_y_axis_title)
+    resolve_plotmath_label(input$bioassay_y_axis_title, force_bold = !isTRUE(input$plain_plot_text))
   } else {
     prepared$y_label
   }
+
+  label_fontface <- if (isTRUE(input$plain_plot_text)) "plain" else "bold"
 
   label_rows <- label_info$label_rows
 
@@ -3027,7 +3090,7 @@ build_bioassay_plot <- function(prepared, input) {
           position = bar_position,
           vjust = 0,
           size = input$bioassay_label_size,
-          fontface = "bold",
+          fontface = label_fontface,
           show.legend = FALSE
         )
       } else {
@@ -3036,7 +3099,7 @@ build_bioassay_plot <- function(prepared, input) {
           aes(x = x, y = label_y, label = display_label),
           vjust = 0,
           size = input$bioassay_label_size,
-          fontface = "bold",
+          fontface = label_fontface,
           show.legend = FALSE
         )
       }
@@ -3099,7 +3162,7 @@ build_bioassay_plot <- function(prepared, input) {
           position = ggplot2::position_dodge(width = 0.78),
           vjust = 0,
           size = input$bioassay_label_size,
-          fontface = "bold",
+          fontface = label_fontface,
           show.legend = FALSE
         )
       } else {
@@ -3108,7 +3171,7 @@ build_bioassay_plot <- function(prepared, input) {
           aes(x = x, y = label_y, label = display_label),
           vjust = 0,
           size = input$bioassay_label_size,
-          fontface = "bold",
+          fontface = label_fontface,
           show.legend = FALSE
         )
       }
@@ -3205,7 +3268,7 @@ build_bioassay_plot <- function(prepared, input) {
             aes(x = x_numeric, y = label_y, label = display_label),
             vjust = 0,
             size = input$bioassay_label_size,
-            fontface = "bold",
+            fontface = label_fontface,
             show.legend = FALSE
           )
         } else {
@@ -3214,7 +3277,7 @@ build_bioassay_plot <- function(prepared, input) {
             aes(x = x_numeric, y = label_y, label = display_label),
             vjust = 0,
             size = input$bioassay_label_size,
-            fontface = "bold",
+            fontface = label_fontface,
             show.legend = FALSE
           )
         }
@@ -3299,7 +3362,7 @@ build_bioassay_plot <- function(prepared, input) {
             aes(x = x, y = label_y, label = display_label),
             vjust = 0,
             size = input$bioassay_label_size,
-            fontface = "bold",
+            fontface = label_fontface,
             show.legend = FALSE
           )
         } else {
@@ -3308,7 +3371,7 @@ build_bioassay_plot <- function(prepared, input) {
             aes(x = x, y = label_y, label = display_label),
             vjust = 0,
             size = input$bioassay_label_size,
-            fontface = "bold",
+            fontface = label_fontface,
             show.legend = FALSE
           )
         }
@@ -3334,7 +3397,8 @@ build_bioassay_plot <- function(prepared, input) {
       legend_position = if (has_series) input$legend_position else "None",
       background_fill = input$background_fill,
       grid_mode = input$plot_grid_mode,
-      legend_title_size = input$legend_title_size
+      legend_title_size = input$legend_title_size,
+      plain_text = input$plain_plot_text
     ) +
     scale_y_continuous(
       labels = format_axis_labels,
@@ -3831,6 +3895,7 @@ ui <- fluidPage(
           br(),
           textInput("x_axis_title", "X-axis title", value = ""),
           textInput("y_axis_title", "Y-axis title", value = ""),
+          checkboxInput("plain_plot_text", "Use plain (non-bold) plot text", value = FALSE),
           helpText("Use plotmath: for formatted titles. Subscript example: plotmath: IC[50]~\"(uM)\". Superscript example: plotmath: NO[3]^\"-\"."),
           div(
             class = "help-block",
@@ -3884,6 +3949,15 @@ ui <- fluidPage(
             selected = "White"
           ),
           checkboxInput("use_group_shapes", "Use different point shapes by group", value = TRUE),
+          conditionalPanel(
+            condition = "!input.use_group_shapes",
+            selectInput(
+              "single_point_shape",
+              "Point symbol",
+              choices = single_point_shape_choices(),
+              selected = "16"
+            )
+          ),
           checkboxInput("show_raw_points", "Show raw points", value = FALSE),
           checkboxInput("show_errorbars", "Show SD error bars", value = TRUE),
           checkboxInput("facet_by_group", "Facet by group", value = FALSE),
