@@ -1,32 +1,31 @@
 # IC50 Studio
 
-IC50 Studio is an R Shiny app for loading dose-response data, fitting common sigmoid models, calculating IC50 or EC50 values, comparing equations, and exporting publication-ready plots.
+IC50 Studio is an open R Shiny app for dose-response analysis and publication-oriented figure making. It helps you load assay data, fit common sigmoid models, calculate IC50 or EC50 values, compare equations, review fit quality, and export plots and tables.
 
-It is designed for people who normally work in spreadsheet-based curve-fitting tools but want an open, editable workflow in R.
+The app was developed at the **Laboratory of Bioactive Peptides (LPB)**, Faculty of Biochemistry and Biological Sciences, National University of the Littoral (UNL), Santa Fe, Argentina.
 
-Developed at the **Laboratory of Bioactive Peptides (LPB)**, Faculty of Biochemistry and Biological Sciences, National University of the Littoral (UNL), Santa Fe, Argentina.
+## Documentation
 
-## Features
+- Quick overview: this `README.md`
+- Full guide: [USER_MANUAL.md](USER_MANUAL.md)
+- In-app guide: the `Instructions` tab
 
-- Import `csv`, `tsv`, `txt`, `xls`, and `xlsx`
-- Map your own concentration/dose, response, and grouping columns
-- Build grouped `bar plots`, `boxplots`, and `line plots` for inhibitor and other bioassay datasets
-- Map separate bioassay `x`, `y`, `series`, `facet`, and optional annotation columns from the same uploaded file
-- Add manual or automatic significance letters to `bar plots`
-- Normalize responses either from the observed range or from manual 100% and 0% assay controls
+## Main capabilities
+
+- Import `csv`, `tsv`, `txt`, `xls`, and `xlsx` files
+- Map your own dose, response, and optional group columns
 - Fit `4PL`, `5PL`, `3PL (Hill fixed = 1)`, `3PL (Bottom = 0)`, and `3PL (Top = 100)`
+- Report either `IC50` or `EC50`
 - Use `Auto-detect`, `Increasing`, or `Decreasing` curve direction
 - Fit either `Group means` or `All observations`
-- Compare all models without bootstrap and get a suggested equation
-- Report IC50 or EC50 with `None`, `95% CI`, `+/- SD`, or `+/- SEM`
-- Export curve plots, other plots, and results tables
-- Flag non-reportable IC50 values such as curves that never reach 50%
-- Show short fit-quality reasons such as `Top far above data` or `50% not reached`
-- Show an analysis summary window after fitting when some groups need review
+- Compare all supported models before running bootstrap uncertainty
+- Export curve plots, fit tables, other plots, and other-plot summary tables
+- Build `Bar plot`, `Boxplot`, and `Line plot` figures in the `Other Plots` tab
+- Add manual annotation labels or automatic significance letters to bar plots
 
 ## Installation
 
-Install the required R packages once:
+Install the required packages once:
 
 ```r
 install.packages(c("shiny", "bslib", "ggplot2", "DT", "readxl"))
@@ -40,133 +39,112 @@ Open R or RStudio in this folder and run:
 shiny::runApp()
 ```
 
-## Expected data format
+## Quick start
 
-Your input file should contain:
+1. Launch the app.
+2. Click `Use example dataset` or upload your own file.
+3. Map the `Concentration or dose column`, `Response column`, and optional `Group or compound column`.
+4. Start with `Fit curve using = Group means`.
+5. Keep `Potency uncertainty = None` during exploration.
+6. If you are unsure which equation fits best, enable `Compare all models first (no bootstrap)`.
+7. Click `Run analysis`.
+8. Review `Curve Plot`, `Fit Results`, and `Model Comparison`.
+9. Only after the fit looks right, enable bootstrap uncertainty for final reporting.
+10. Use the `Other Plots` tab if you want publication-style assay figures that do not require curve fitting.
 
-- one numeric concentration or dose column
+## Input data expectations
+
+For dose-response fitting, your file should contain:
+
+- one numeric dose or concentration column
 - one numeric response column
-- one optional grouping column such as `compound`, `sample`, or `treatment`
+- one optional grouping column such as `compound`, `sample`, `treatment`, or `peptide`
 
-Notes:
+Important behavior:
 
-- Concentration values must be greater than zero for standard log-scale fitting.
-- The app does not assume a fixed concentration unit.
-- You can use `nM`, `uM`, `ug/mL`, `mg/mL`, or any other unit as long as the concentration column is numeric.
-- Write the exact unit you want in the x-axis title.
-- If you want absolute-style normalization, you can enter manual `100%` and `0%` control responses. The app uses `100 * (Y - control_0) / (control_100 - control_0)`.
+- Negative doses are removed.
+- Zero-dose rows are kept for preview and linear-axis plotting, but excluded from the actual curve fit.
+- Each fitted group needs at least `4` distinct positive dose values.
+- The app does not assume a fixed concentration unit. You can use `nM`, `uM`, `ug/mL`, `mg/mL`, or any other unit as long as the dose column is numeric.
+- If you choose `Normalize using manual 0% and 100% controls`, the app applies `100 * (Y - control_0) / (control_100 - control_0)`.
 
 An example file is included at [example_dose_response.csv](example_dose_response.csv).
 
-## Recommended workflow
+## Dose-response highlights
 
-1. Upload your file.
-2. Map the concentration, response, and optional group columns.
-3. Leave `Curve direction` on `Auto-detect` unless you need to force it.
-4. Start with `Potency uncertainty = None` for speed.
-5. If you are unsure which model to use, enable `Compare all models first (no bootstrap)`.
-6. Click `Run analysis`.
-7. Review the suggested model and the fit table.
-8. Only after the fit looks good, turn on bootstrap uncertainty for final reporting.
-9. Adjust plot styling and export.
+- `IC50` uses a fixed response target of `50`.
+- `EC50` uses the half-max effect between the fitted bottom and fitted top.
+- `Auto-detect` direction chooses the better fit between increasing and decreasing directions when needed.
+- `Weighting = 1 / SD^2 from means` is only meaningful with `Fit curve using = Group means`.
+- If you switch to `All observations`, the app resets weighting to `None`.
+- `95% CI`, `+/- SD`, and `+/- SEM` are bootstrap-based uncertainty estimates for the fitted potency value.
 
-## How to choose a model
+## Other Plots module
 
-- `4PL`: good general starting point when both lower and upper plateaus are visible
-- `3PL (Hill fixed = 1)`: useful when you want a simpler fixed-slope model
-- `3PL (Bottom = 0)`: useful when the response should start near 0
-- `3PL (Top = 100)`: useful when the response should approach 100
-- `5PL`: useful when the curve is asymmetric
+Use the `Other Plots` tab for figures that are common in inhibitor, hemolysis, viability, or other bioassay workflows.
 
-If you are unsure, use the model comparison option first.
+Supported plot types:
 
-## Interpreting the fit table
+- `Bar plot`
+- `Boxplot`
+- `Line plot`
 
-The app reports a `reporting_status` column to make it clearer what should and should not be reported:
+Useful details:
 
-- `Report numeric potency value`: the fit looks acceptable for numeric reporting
-- `Do not report numeric value (target not reached)`: the observed data never reach the target response for the selected metric, so report this as above or below the tested range instead of giving a numeric value
-- `Do not report numeric value (extrapolated)`: the fitted value falls outside the tested concentration range
-- `Numeric value shown; review fit`: the fit exists, but the curve shape or plateau behavior needs caution
-- `No fit available`: the curve could not be fit
+- The module uses the same uploaded dataset as the curve-fitting workflow, but has its own `X`, `Y`, `Series / color`, `Facet`, and `Optional annotation` mapping.
+- `Bar plot` and `Line plot` can summarize replicates with `Mean` or `Median`.
+- Available error bars are `SEM`, `SD`, `95% CI`, `IQR`, or `None`.
+- `Boxplot` is best for raw replicate distributions, not pre-summarized means.
+- `Bar plot` supports either manual annotation labels or automatic significance letters.
 
-The table also includes a `fit_reason` column with a short explanation:
+Automatic letters in bar plots:
 
-- `Top far above data`: the fitted upper plateau is much higher than the observed points, so the model is extrapolating strongly
-- `Bottom far below data`: the fitted lower plateau drops well below the observed low-response points
-- `50% not reached`: used in IC50 mode when the observed responses never cross the 50% level
-- `Half-max effect not reached`: used in EC50 mode when the observed responses do not span the fitted half-max effect level
-- `Value outside tested range`: the fitted potency value lies outside the tested concentration range
-- `Flat or invalid fitted range`: the fitted curve collapsed to an implausible response span
+- Methods: `ANOVA + Tukey HSD` or `Kruskal-Wallis + pairwise Wilcoxon (Holm)`
+- Default comparison scope: `Within each x group in each facet`
+- Recommended use: independent biological replicates, not only technical repeats
+- Important limitation: the lettering is a one-factor comparison inside the selected scope and does not replace a full factorial statistical analysis
 
-In many practical cases, a visually smooth `4PL` can still be flagged if the fitted top or bottom is unrealistic. When this happens, try a simpler model such as `3PL (Hill fixed = 1)` or expand the concentration range.
+## Reading the results
 
-## Analysis summary window
+The `Fit Results` table includes a `reporting_status` column to help decide whether a numeric potency value should be reported:
 
-After each run, the app can show a short summary window if any groups need attention. This summary helps you quickly see:
+- `Report numeric potency value`
+- `Do not report numeric value (target not reached)`
+- `Do not report numeric value (extrapolated)`
+- `Numeric value shown; review fit`
+- `No fit available`
 
-- how many groups are reportable
-- how many groups did not reach 50%
-- how many groups are extrapolated
-- how many groups need manual review
-- the most common `fit_reason` values in that run
+The `fit_reason` and `reporting_note` columns explain why a row needs caution.
 
-Use the popup as a quick warning, then check the full `Fit Results` table for the final interpretation.
+## Model comparison
 
-## Potency uncertainty
+When `Compare all models first (no bootstrap)` is enabled, the app ranks supported equations by:
 
-Potency uncertainty is optional and uses bootstrap resampling.
+1. how many groups give reportable numeric potency values
+2. how many groups fit successfully
+3. how many groups still need review
+4. median `R-squared`
+5. simpler models when the earlier criteria are tied
 
-- `95% CI` is usually the best choice for publication
-- `+/- SD` and `+/- SEM` are derived from the bootstrap distribution of the fitted potency value
-- Keep uncertainty set to `None` during exploration for speed
-- Around `50` bootstrap iterations is useful for a quick preview
-- Around `100 to 200` bootstrap iterations is a better starting point for final reporting
+This makes it easier to choose a practical model before spending time on bootstrap uncertainty.
 
-## Plotting notes
+## Exports
 
-- Percent-like data will default to a `0 to 100` y-axis
-- The default y-axis includes `50` and `100` as reference values
-- You can hide the plot title and subtitle with checkboxes
-- Styling options, axis controls, and export settings are grouped in dropdown sections to keep the main panel shorter
+You can export:
 
-## Other plots module
+- the main curve plot
+- the fit-results CSV
+- the other-plot figure
+- the other-plot summary CSV
 
-The app now includes a separate `Other Plots` tab for publication-style assay figures that do not require dose-response fitting.
-
-Typical uses:
-
-- grouped bar plots for compounds or peptides tested at several concentrations
-- boxplots for replicate distributions across treatments
-- line plots for time-course or concentration-course summaries
-
-Typical mapping for a figure like the attached hemolysis example:
-
-- `X column`: peptide or compound name
-- `Y column`: measured response such as `% hemolysis`
-- `Series / color column`: concentration
-- `Optional annotation column`: significance letters such as `a`, `b`, `c`
-
-Notes:
-
-- The other-plots module uses the same uploaded file as the curve-fitting workflow.
-- `Bar plot` and `Line plot` can summarize replicates with `Mean` or `Median`, plus `SEM`, `SD`, `95% CI`, `IQR`, or no error bars.
-- `Boxplot` shows the raw distribution and can still overlay replicate points and annotation labels.
-- `Bar plot` can use either a manual annotation column or automatic compact-letter labels from `ANOVA + Tukey HSD` or `Kruskal + pairwise Wilcoxon`.
-- Automatic letters should be used only when the rows being compared are independent biological observations rather than technical repeats from the same sample.
-- Styling and export settings are shared with the main curve plot module so the figures stay visually consistent.
+The export settings panel controls file name, format, units, width, height, and DPI for both plotting modules.
 
 ## Troubleshooting
 
-- If the fit looks flat or wrong, first check the selected group column and curve direction.
-- If the app reports that 50% was not reached, expand the concentration range instead of forcing a numeric IC50.
-- If many groups are marked `Top far above data`, the selected model is probably too flexible for the available plateau information.
-- If you are working with inhibition data, consider `Invert as 100 - response`.
-- If different compounds behave very differently, use the model comparison option before enabling bootstrap.
-
-## Included help
-
-The app also includes an `Instructions` tab with a built-in quick guide, model advice, uncertainty notes, and troubleshooting tips, plus an `About` tab with project and contact information.
+- If a curve looks wrong, first check the mapped columns and `Curve direction`.
+- If many groups are flagged as `Top far above data` or `Bottom far below data`, try a simpler model or expand the tested concentration range.
+- If the app says the target was not reached, do not force a numeric IC50 or EC50. Report that the effect was not reached within the tested range.
+- If you want a boxplot, make sure your rows are raw replicate values. If your file already contains means plus SD or SEM, use a bar plot instead.
 
 ## Contact
 

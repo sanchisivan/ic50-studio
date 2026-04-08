@@ -249,6 +249,29 @@ format_decimal_text <- function(x, decimals = 2) {
   formatC(x, format = "f", digits = decimals)
 }
 
+format_decimal_compact <- function(x, decimals = 2) {
+  formatted <- ifelse(is.finite(x), formatC(x, format = "f", digits = decimals), NA_character_)
+  formatted <- sub("0+$", "", formatted)
+  formatted <- sub("[.]$", "", formatted)
+  formatted
+}
+
+format_legend_labels <- function(values, decimals = 2) {
+  values_chr <- as.character(values)
+  trimmed <- trimws(values_chr)
+
+  if (!length(trimmed)) {
+    return(character())
+  }
+
+  numeric_values <- suppressWarnings(as.numeric(trimmed))
+  if (all(is.finite(numeric_values))) {
+    return(format_decimal_compact(numeric_values, decimals))
+  }
+
+  values_chr
+}
+
 potency_metric_label <- function(potency_metric = "IC50") {
   if (!nzchar(trimws(potency_metric %||% ""))) {
     return("IC50")
@@ -356,11 +379,12 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
   df <- df[is.finite(df$dose) & is.finite(df$response) & nzchar(df$group), c("group", "dose", "response")]
   removed_non_numeric <- original_n - nrow(df)
 
-  removed_non_positive <- sum(df$dose <= 0, na.rm = TRUE)
-  df <- df[df$dose > 0, , drop = FALSE]
+  removed_negative <- sum(df$dose < 0, na.rm = TRUE)
+  zero_dose_rows <- sum(df$dose == 0, na.rm = TRUE)
+  df <- df[df$dose >= 0, , drop = FALSE]
 
   if (nrow(df) == 0) {
-    stop("No valid rows left after filtering. Dose values must be numeric and greater than zero.")
+    stop("No valid rows left after filtering. Dose values must be numeric and zero or greater.")
   }
 
   split_groups <- split(df, df$group)
@@ -372,14 +396,34 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
   df <- do.call(rbind, normalized_groups)
   rownames(df) <- NULL
 
+  fit_df <- df[df$dose > 0, , drop = FALSE]
+  if (nrow(fit_df) == 0) {
+    stop("No positive dose values remain for fitting. Keep at least one concentration above zero for IC50 or EC50 analysis.")
+  }
+
   summary_df <- compute_summary(df)
-  diagnostics_df <- group_diagnostics(df)
+  fit_summary_df <- compute_summary(fit_df)
+
+  split_groups_all <- split(df, df$group)
+  diagnostics_df <- data.frame(
+    group = names(split_groups_all),
+    n_points = vapply(split_groups_all, nrow, integer(1)),
+    distinct_doses = vapply(
+      split_groups_all,
+      function(piece) length(unique(piece$dose[piece$dose > 0])),
+      integer(1)
+    ),
+    stringsAsFactors = FALSE
+  )
+  diagnostics_df$can_fit <- diagnostics_df$distinct_doses >= 4
+  diagnostics_df <- diagnostics_df[order(diagnostics_df$group), , drop = FALSE]
   problem_groups <- diagnostics_df[!diagnostics_df$can_fit, , drop = FALSE]
 
   notes <- c(
     sprintf("Rows loaded: %s", original_n),
     sprintf("Removed non-numeric rows: %s", removed_non_numeric),
-    sprintf("Removed rows with dose <= 0: %s", removed_non_positive),
+    sprintf("Removed rows with dose < 0: %s", removed_negative),
+    sprintf("Zero-dose rows retained for preview/linear plots but excluded from fitting: %s", zero_dose_rows),
     sprintf("Groups detected: %s", length(unique(df$group))),
     sprintf("Groups fit-ready (>=4 distinct doses): %s", sum(diagnostics_df$can_fit)),
     sprintf("Normalization: %s", normalization),
@@ -411,7 +455,10 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
   list(
     raw = df[order(df$group, df$dose), ],
     summary = summary_df,
+    fit_raw = fit_df[order(fit_df$group, fit_df$dose), ],
+    fit_summary = fit_summary_df,
     diagnostics = diagnostics_df,
+    zero_dose_rows = zero_dose_rows,
     notes = notes
   )
 }
@@ -850,7 +897,7 @@ symmetrize_pairwise_p <- function(lower_matrix, group_levels) {
   p_matrix
 }
 
-compute_pairwise_p_matrix <- function(values, groups, method_name) {
+compute_pairwise_p_matrix <- function(values, groups, method_name, alpha = 0.05) {
   group_factor <- factor(groups)
   group_levels <- levels(group_factor)
 
@@ -893,10 +940,36 @@ compute_pairwise_p_matrix <- function(values, groups, method_name) {
       p_matrix[group_low, group_high] <- p_value
     }
 
-    return(p_matrix)
+    return(list(
+      p_matrix = p_matrix,
+      note = "ANOVA fit completed and Tukey HSD pairwise comparisons were used for the letters."
+    ))
   }
 
-  if (identical(method_name, "Kruskal + pairwise Wilcoxon")) {
+  if (identical(method_name, "Kruskal-Wallis + pairwise Wilcoxon (Holm)")) {
+    omnibus <- stats::kruskal.test(x = values, g = group_factor)
+
+    if (!is.finite(omnibus$p.value)) {
+      stop("Kruskal-Wallis did not return a finite p-value.")
+    }
+
+    if (omnibus$p.value >= alpha) {
+      p_matrix <- matrix(
+        1,
+        nrow = length(group_levels),
+        ncol = length(group_levels),
+        dimnames = list(group_levels, group_levels)
+      )
+
+      return(list(
+        p_matrix = p_matrix,
+        note = sprintf(
+          "Kruskal-Wallis was not significant (p = %s), so all groups share the same letter.",
+          format_decimal_text(omnibus$p.value, 4)
+        )
+      ))
+    }
+
     pairwise <- suppressWarnings(
       stats::pairwise.wilcox.test(
         x = values,
@@ -910,7 +983,13 @@ compute_pairwise_p_matrix <- function(values, groups, method_name) {
       stop("Pairwise Wilcoxon did not return a p-value matrix.")
     }
 
-    return(symmetrize_pairwise_p(pairwise$p.value, group_levels))
+    return(list(
+      p_matrix = symmetrize_pairwise_p(pairwise$p.value, group_levels),
+      note = sprintf(
+        "Kruskal-Wallis was significant (p = %s), so Holm-adjusted pairwise Wilcoxon tests were used for the letters.",
+        format_decimal_text(omnibus$p.value, 4)
+      )
+    ))
   }
 
   stop("Unknown bar-plot letter method.")
@@ -944,6 +1023,7 @@ compute_auto_bioassay_letters <- function(prepared, method_name, scope_name, alp
   family_pieces <- split(work_df, work_df$family_id)
   analyzed_families <- 0
   skipped_messages <- character()
+  family_notes <- character()
 
   for (family_name in names(family_pieces)) {
     piece <- family_pieces[[family_name]]
@@ -958,18 +1038,21 @@ compute_auto_bioassay_letters <- function(prepared, method_name, scope_name, alp
     reverse_lookup <- setNames(names(group_lookup), group_lookup)
     piece$group_id <- factor(group_lookup[as.character(piece$group_value)], levels = unname(group_lookup))
 
-    p_matrix <- try(
-      compute_pairwise_p_matrix(piece$y, piece$group_id, method_name),
+    test_result <- try(
+      compute_pairwise_p_matrix(piece$y, piece$group_id, method_name, alpha = alpha),
       silent = TRUE
     )
 
-    if (inherits(p_matrix, "try-error")) {
+    if (inherits(test_result, "try-error")) {
       skipped_messages <- c(
         skipped_messages,
-        sprintf("Skipped one comparison family because %s.", conditionMessage(attr(p_matrix, "condition") %||% simpleError("the test failed")))
+        sprintf("Skipped one comparison family because %s.", conditionMessage(attr(test_result, "condition") %||% simpleError("the test failed")))
       )
       next
     }
+
+    p_matrix <- test_result$p_matrix
+    family_notes <- c(family_notes, test_result$note %||% "")
 
     off_diagonal <- p_matrix[row(p_matrix) != col(p_matrix)]
     if (!length(off_diagonal) || !any(is.finite(off_diagonal))) {
@@ -1010,6 +1093,7 @@ compute_auto_bioassay_letters <- function(prepared, method_name, scope_name, alp
       format_decimal_text(alpha, 3),
       scope_name
     ),
+    unique(family_notes),
     unique(skipped_messages)
   )
 
@@ -1023,6 +1107,10 @@ resolve_bioassay_label_data <- function(prepared, summary_df, input) {
   output_df <- summary_df
   output_df$display_label <- NA_character_
   output_df$label_source <- "None"
+  output_df$label_mode_selected <- input$bioassay_label_mode %||% "None"
+  output_df$label_test_method <- NA_character_
+  output_df$label_compare_scope <- NA_character_
+  output_df$label_alpha <- NA_real_
   notes <- character()
   label_mode <- input$bioassay_label_mode %||% "None"
 
@@ -1037,10 +1125,13 @@ resolve_bioassay_label_data <- function(prepared, summary_df, input) {
     if (!identical(input$bioassay_plot_type, "Bar plot")) {
       notes <- c(notes, "Automatic significance letters are currently available only for bar plots.")
     } else {
+      output_df$label_test_method <- input$bioassay_letters_method %||% "ANOVA + Tukey HSD"
+      output_df$label_compare_scope <- input$bioassay_letters_scope %||% "Within each x group in each facet"
+      output_df$label_alpha <- input$bioassay_letters_alpha %||% 0.05
       auto_letters <- compute_auto_bioassay_letters(
         prepared = prepared,
         method_name = input$bioassay_letters_method %||% "ANOVA + Tukey HSD",
-        scope_name = input$bioassay_letters_scope %||% "Across all bars in each facet",
+        scope_name = input$bioassay_letters_scope %||% "Within each x group in each facet",
         alpha = input$bioassay_letters_alpha %||% 0.05
       )
 
@@ -1927,7 +2018,7 @@ analysis_summary_modal <- function(summary_info, comparison = NULL, selected_mod
 }
 
 fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, uncertainty_method = "None", bootstrap_iterations = 200, ic50_decimals = 2, potency_metric = "IC50", progress_callback = NULL) {
-  fit_source <- if (identical(fit_to, "Group means")) prepared$summary else prepared$raw
+  fit_source <- if (identical(fit_to, "Group means")) prepared$fit_summary else prepared$fit_raw
   split_groups <- split(fit_source, fit_source$group)
   diagnostics_df <- group_diagnostics(fit_source)
   fits <- vector("list", length(split_groups))
@@ -1993,8 +2084,11 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
 
     step_progress(sprintf("Curve fit completed for %s", group_name))
 
-    if (fits[[group_name]]$result_row$fit_status[1] == "OK" && !identical(uncertainty_method, "None")) {
+    if (fits[[group_name]]$result_row$fit_status[1] == "OK" &&
+        !identical(uncertainty_method, "None") &&
+        !identical(fits[[group_name]]$result_row$fit_reliability[1], reliability_target_not_reached)) {
       raw_group_df <- prepared$raw[prepared$raw$group == group_name, , drop = FALSE]
+      raw_group_df <- raw_group_df[raw_group_df$dose > 0, , drop = FALSE]
       uncertainty_values <- estimate_ic50_uncertainty(
         raw_group_df = raw_group_df,
         group_name = group_name,
@@ -2023,6 +2117,14 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
         uncertainty_values = uncertainty_values,
         decimals = ic50_decimals
       )
+    } else if (fits[[group_name]]$result_row$fit_status[1] == "OK" &&
+               !identical(uncertainty_method, "None") &&
+               identical(fits[[group_name]]$result_row$fit_reliability[1], reliability_target_not_reached)) {
+      fits[[group_name]]$result_row$ic50_sd <- NA_real_
+      fits[[group_name]]$result_row$ic50_sem <- NA_real_
+      fits[[group_name]]$result_row$ic50_ci95_low <- NA_real_
+      fits[[group_name]]$result_row$ic50_ci95_high <- NA_real_
+      fits[[group_name]]$result_row$ic50_boot_n <- 0
     } else if (fits[[group_name]]$result_row$fit_status[1] == "OK") {
       fits[[group_name]]$result_row$ic50_reported <- format_ic50_report(
         ic50_value = fits[[group_name]]$result_row$ic50[1],
@@ -2110,6 +2212,20 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
       fit_messages,
       paste0(potency_metric_label(potency_metric), " uncertainty reported as ", uncertainty_method, " using bootstrap resampling (n = ", bootstrap_iterations, ").")
     )
+    skipped_uncertainty <- sum(
+      results_df$fit_status == "OK" &
+        results_df$fit_reliability == reliability_target_not_reached,
+      na.rm = TRUE
+    )
+    if (isTRUE(skipped_uncertainty > 0)) {
+      fit_messages <- c(
+        fit_messages,
+        sprintf(
+          "Bootstrap uncertainty was skipped for %s group(s) because the target response was not reached.",
+          skipped_uncertainty
+        )
+      )
+    }
   }
 
   list(
@@ -2138,7 +2254,7 @@ compare_models <- function(prepared, fit_to, direction, weighting, curve_points,
   model_fits <- vector("list", length(all_model_choices))
   names(model_fits) <- all_model_choices
 
-  per_model_steps <- length(unique((if (identical(fit_to, "Group means")) prepared$summary else prepared$raw)$group))
+  per_model_steps <- length(unique((if (identical(fit_to, "Group means")) prepared$fit_summary else prepared$fit_raw)$group))
   total_steps <- max(length(all_model_choices) * max(per_model_steps, 1), 1)
 
   for (i in seq_along(all_model_choices)) {
@@ -2319,9 +2435,13 @@ resolve_panel_fill <- function(background_fill) {
   )
 }
 
-publication_theme <- function(style_name, base_size, legend_position, background_fill, grid_mode = "Match style") {
+publication_theme <- function(style_name, base_size, legend_position, background_fill, grid_mode = "Match style", legend_title_size = NULL) {
   panel_fill <- resolve_panel_fill(background_fill)
   plot_fill <- resolve_plot_fill(background_fill)
+  legend_fill <- plot_fill
+  if (is.null(legend_title_size) || !is.finite(legend_title_size)) {
+    legend_title_size <- base_size
+  }
 
   base_theme <- switch(
     style_name,
@@ -2336,7 +2456,10 @@ publication_theme <- function(style_name, base_size, legend_position, background
       plot.title = element_text(face = "bold", size = base_size + 6, colour = "#111827"),
       plot.subtitle = element_text(colour = "#4b5563", size = base_size),
       legend.position = tolower(legend_position),
-      legend.title = element_text(face = "bold"),
+      legend.title = element_text(face = "bold", size = legend_title_size),
+      legend.background = element_rect(fill = legend_fill, colour = NA),
+      legend.box.background = element_rect(fill = legend_fill, colour = NA),
+      legend.key = element_rect(fill = legend_fill, colour = NA),
       axis.title = element_text(face = "bold"),
       panel.grid.minor = element_blank(),
       panel.background = element_rect(fill = panel_fill, colour = NA),
@@ -2476,15 +2599,31 @@ plot_preset_values <- function(preset_name) {
   )
 }
 
+resolve_legend_title <- function(show_title, custom_title, default_title = "Series") {
+  if (!isTRUE(show_title)) {
+    return(NULL)
+  }
+
+  custom_title <- trimws(custom_title %||% "")
+  if (nzchar(custom_title)) {
+    return(custom_title)
+  }
+
+  default_title
+}
+
 build_plot <- function(prepared, fit_data, input) {
   groups <- unique(prepared$raw$group)
   palette_values <- publication_palette(length(groups), input$palette_name)
   names(palette_values) <- groups
   shape_values <- publication_shapes(length(groups))
   names(shape_values) <- groups
-  legend_name <- if (isTRUE(input$show_legend_title)) "Series" else NULL
+  legend_name <- resolve_legend_title(input$show_legend_title, input$legend_title, "Series")
+  legend_labels <- format_legend_labels(groups, input$legend_label_decimals %||% 2)
   show_point_legend <- !identical(input$legend_content, "Lines only")
   show_line_legend <- !identical(input$legend_content, "Points only")
+  plot_raw_df <- if (isTRUE(input$use_log10_axis)) prepared$raw[prepared$raw$dose > 0, , drop = FALSE] else prepared$raw
+  plot_summary_df <- if (isTRUE(input$use_log10_axis)) prepared$summary[prepared$summary$dose > 0, , drop = FALSE] else prepared$summary
 
   x_breaks <- parse_numeric_values(input$x_breaks)
   y_breaks <- parse_numeric_values(input$y_breaks)
@@ -2518,25 +2657,14 @@ build_plot <- function(prepared, fit_data, input) {
     "Dose-response curve fit"
   }
   plot_title <- if (isTRUE(input$show_plot_title)) plot_title else NULL
-  plot_subtitle <- if (isTRUE(input$show_plot_subtitle)) {
-    paste(
-      "Model:",
-      input$model_equation,
-      "| Fit:",
-      input$fit_to,
-      "| Direction:",
-      direction_summary_label(fit_data$results, input$direction)
-    )
-  } else {
-    NULL
-  }
+  plot_subtitle <- NULL
 
   p <- ggplot()
 
   if (isTRUE(input$show_raw_points)) {
     if (isTRUE(input$use_group_shapes)) {
       p <- p + geom_point(
-        data = prepared$raw,
+        data = plot_raw_df,
         aes(x = dose, y = response, color = group, shape = group),
         alpha = 0.45,
         size = input$point_size * 0.8,
@@ -2544,7 +2672,7 @@ build_plot <- function(prepared, fit_data, input) {
       )
     } else {
       p <- p + geom_point(
-        data = prepared$raw,
+        data = plot_raw_df,
         aes(x = dose, y = response, color = group),
         alpha = 0.45,
         size = input$point_size * 0.8,
@@ -2554,7 +2682,7 @@ build_plot <- function(prepared, fit_data, input) {
   }
 
   if (isTRUE(input$show_errorbars)) {
-    errorbar_df <- prepared$summary[is.finite(prepared$summary$response_sd), ]
+    errorbar_df <- plot_summary_df[is.finite(plot_summary_df$response_sd), ]
     if (nrow(errorbar_df) > 0) {
       p <- p + geom_errorbar(
         data = errorbar_df,
@@ -2576,7 +2704,7 @@ build_plot <- function(prepared, fit_data, input) {
   if (isTRUE(input$use_group_shapes)) {
     p <- p +
       geom_point(
-        data = prepared$summary,
+        data = plot_summary_df,
         aes(x = dose, y = response, color = group, shape = group),
         size = input$point_size,
         stroke = 0.8,
@@ -2585,7 +2713,7 @@ build_plot <- function(prepared, fit_data, input) {
   } else {
     p <- p +
       geom_point(
-        data = prepared$summary,
+        data = plot_summary_df,
         aes(x = dose, y = response, color = group),
         size = input$point_size,
         stroke = 0.8,
@@ -2625,7 +2753,7 @@ build_plot <- function(prepared, fit_data, input) {
   }
 
   p <- p +
-    scale_color_manual(values = palette_values, name = legend_name) +
+    scale_color_manual(values = palette_values, breaks = groups, labels = legend_labels, name = legend_name) +
     labs(
       title = plot_title,
       subtitle = plot_subtitle,
@@ -2637,11 +2765,12 @@ build_plot <- function(prepared, fit_data, input) {
       base_size = input$base_font_size,
       legend_position = input$legend_position,
       background_fill = input$background_fill,
-      grid_mode = input$plot_grid_mode
+      grid_mode = input$plot_grid_mode,
+      legend_title_size = input$legend_title_size
     )
 
   if (isTRUE(input$use_group_shapes)) {
-    p <- p + scale_shape_manual(values = shape_values, name = legend_name)
+    p <- p + scale_shape_manual(values = shape_values, breaks = groups, labels = legend_labels, name = legend_name)
   }
 
   if (identical(input$legend_content, "Points only")) {
@@ -2699,7 +2828,12 @@ build_bioassay_plot <- function(prepared, input) {
   series_levels <- levels(raw_df$series)
   palette_values <- publication_palette(length(series_levels), input$palette_name)
   names(palette_values) <- series_levels
-  legend_name <- if (has_series && isTRUE(input$show_legend_title)) prepared$series_label else NULL
+  legend_labels <- format_legend_labels(series_levels, input$legend_label_decimals %||% 2)
+  legend_name <- if (has_series) {
+    resolve_legend_title(input$show_legend_title, input$legend_title, prepared$series_label)
+  } else {
+    NULL
+  }
   plot_type <- input$bioassay_plot_type %||% "Bar plot"
 
   plot_title <- trimws(input$bioassay_title)
@@ -3106,8 +3240,8 @@ build_bioassay_plot <- function(prepared, input) {
 
   if (has_series) {
     p <- p +
-      scale_colour_manual(values = palette_values, name = legend_name) +
-      scale_fill_manual(values = palette_values, name = legend_name)
+      scale_colour_manual(values = palette_values, breaks = series_levels, labels = legend_labels, name = legend_name) +
+      scale_fill_manual(values = palette_values, breaks = series_levels, labels = legend_labels, name = legend_name)
   }
 
   p <- p +
@@ -3121,7 +3255,8 @@ build_bioassay_plot <- function(prepared, input) {
       base_size = input$base_font_size,
       legend_position = if (has_series) input$legend_position else "None",
       background_fill = input$background_fill,
-      grid_mode = input$plot_grid_mode
+      grid_mode = input$plot_grid_mode,
+      legend_title_size = input$legend_title_size
     ) +
     scale_y_continuous(
       labels = format_axis_labels,
@@ -3563,6 +3698,10 @@ ui <- fluidPage(
             choices = c("None", "1 / SD^2 from means"),
             selected = "None"
           ),
+          conditionalPanel(
+            condition = "input.fit_to === 'All observations'",
+            helpText("Weighting is available only when fitting group means, because SD-based weights come from the summarized replicate table.")
+          ),
           selectInput(
             "ic50_uncertainty",
             "Potency uncertainty",
@@ -3579,18 +3718,17 @@ ui <- fluidPage(
           tags$summary("Curve plot quick controls"),
           br(),
           textInput("plot_title", "Plot title", value = "Dose-response curve fit"),
-          checkboxInput("show_plot_title", "Show title", value = TRUE),
-          checkboxInput("show_plot_subtitle", "Show subtitle", value = TRUE),
+          checkboxInput("show_plot_title", "Show title", value = FALSE),
           selectInput(
             "plot_preset",
             "Plot preset",
             choices = c("Custom", "Journal inhibitor", "High-contrast figure", "Minimal figure", "Monochrome"),
-            selected = "Journal inhibitor"
+            selected = "Custom"
           ),
           checkboxInput("use_log10_axis", "Use log10 concentration axis", value = TRUE),
           checkboxInput("extend_curve_toward_zero", "Extend fitted curve toward zero-dose baseline", value = FALSE),
           numericInput("extra_log_decades", "Extra log10 decades below the minimum dose", value = 1, min = 0, max = 4, step = 0.25),
-          checkboxInput("show_ic50_guides", "Show IC50 guide lines", value = TRUE),
+          checkboxInput("show_ic50_guides", "Show IC50 guide lines", value = FALSE),
           checkboxInput("show_half_max_line", "Show 50% reference line", value = TRUE)
         ),
         tags$details(
@@ -3630,6 +3768,14 @@ ui <- fluidPage(
             selected = "Points and lines"
           ),
           checkboxInput("show_legend_title", "Show legend title", value = TRUE),
+          conditionalPanel(
+            condition = "input.show_legend_title",
+            textInput("legend_title", "Legend title", value = ""),
+            numericInput("legend_title_size", "Legend title size", value = 12, min = 8, max = 30, step = 1),
+            helpText("Leave the legend title blank to use the default mapped label for the current plot.")
+          ),
+          numericInput("legend_label_decimals", "Legend numeric decimals", value = 2, min = 0, max = 8, step = 1),
+          helpText("Legend numeric decimals apply only when the legend entries are numeric, such as concentrations."),
           selectInput(
             "background_fill",
             "Background",
@@ -3637,10 +3783,10 @@ ui <- fluidPage(
             selected = "White"
           ),
           checkboxInput("use_group_shapes", "Use different point shapes by group", value = TRUE),
-          checkboxInput("show_raw_points", "Show raw points", value = TRUE),
+          checkboxInput("show_raw_points", "Show raw points", value = FALSE),
           checkboxInput("show_errorbars", "Show SD error bars", value = TRUE),
           checkboxInput("facet_by_group", "Facet by group", value = FALSE),
-          numericInput("base_font_size", "Base font size", value = 16, min = 8, max = 30, step = 1),
+          numericInput("base_font_size", "Base font size", value = 12, min = 8, max = 30, step = 1),
           numericInput("point_size", "Point size", value = 3.5, min = 1, max = 8, step = 0.25),
           numericInput("line_width", "Curve line width", value = 1.1, min = 0.4, max = 3, step = 0.1)
         ),
@@ -3670,7 +3816,7 @@ ui <- fluidPage(
               selected = "SEM"
             )
           ),
-          checkboxInput("bioassay_show_points", "Overlay raw points", value = TRUE),
+          checkboxInput("bioassay_show_points", "Overlay raw points", value = FALSE),
           selectInput(
             "bioassay_label_mode",
             "Label mode",
@@ -3682,7 +3828,7 @@ ui <- fluidPage(
             selectInput(
               "bioassay_letters_method",
               "Letter test",
-              choices = c("ANOVA + Tukey HSD", "Kruskal + pairwise Wilcoxon"),
+              choices = c("ANOVA + Tukey HSD", "Kruskal-Wallis + pairwise Wilcoxon (Holm)"),
               selected = "ANOVA + Tukey HSD"
             ),
             selectInput(
@@ -3701,7 +3847,7 @@ ui <- fluidPage(
           checkboxInput("bioassay_use_log10_x", "Use log10 x-axis when the selected x column is numeric", value = FALSE),
           numericInput("bioassay_label_size", "Letter / annotation size", value = 5, min = 2, max = 12, step = 0.25),
           textInput("bioassay_title", "Other plot title", value = "Other response plot"),
-          checkboxInput("show_bioassay_title", "Show other-plot title", value = TRUE),
+          checkboxInput("show_bioassay_title", "Show other-plot title", value = FALSE),
           textInput("bioassay_x_axis_title", "Other plot x-axis title", value = ""),
           textInput("bioassay_y_axis_title", "Other plot y-axis title", value = ""),
           helpText("For inhibitor-style grouped bars like the example image, map X = compound or peptide, Y = response, Series = concentration, and either choose an annotation column or turn on automatic significance letters.")
@@ -3793,19 +3939,20 @@ ui <- fluidPage(
             tags$p("Typical mappings are X = peptide or treatment, Y = response, Series = concentration or condition, and Optional annotation = significance letters or compact letter displays."),
             tags$p("Bar plot is useful for grouped inhibitor summaries, Boxplot is useful for replicate distributions, and Line plot is useful for time-course or concentration-course summaries."),
             tags$p("The other-plots module uses the same uploaded file, styling palette, and export settings as the curve plot tab, but it has its own x/y/series mapping and summary controls."),
-            tags$p("Bar plots can now add automatic significance letters from ANOVA plus Tukey HSD or Kruskal plus pairwise Wilcoxon comparisons. Use these letters only when your rows are independent biological replicates, not only technical repeats."),
+            tags$p("Bar plots can now add automatic significance letters from ANOVA plus Tukey HSD or Kruskal-Wallis plus Holm-adjusted pairwise Wilcoxon comparisons. Use these letters only when your rows are independent biological replicates, not only technical repeats."),
             br(),
             h4("Recommended workflow"),
             tags$p("Start with Group means and IC50 uncertainty = None."),
             tags$p("If you are not sure which equation to use, enable model comparison first. The app will suggest a model based on how many groups give reportable IC50 values and how well the curves fit."),
             tags$p("Once you choose the model, run the final fit again with bootstrap uncertainty if you want 95% CI, SD, or SEM."),
             tags$p("Use the plot controls only after the fitting looks right. Styling should be the last step, not the first."),
+            tags$p("Use weighting only with Group means. When you fit All observations, the app resets weighting to None because SD-based weights come from the summarized means table."),
             tags$p("If you want the displayed sigmoid to continue toward the zero-dose baseline even when you did not measure a zero point, turn on 'Extend fitted curve toward zero-dose baseline'."),
             br(),
             h4("Data format"),
             tags$p("Supported files: CSV, TSV, TXT, XLS, XLSX."),
             tags$p("Recommended columns: one numeric concentration or dose column, one numeric response column, and an optional grouping column such as compound, sample, treatment, or replicate set."),
-            tags$p("Concentration values must be greater than zero if you want a log-scale x axis or a standard IC50 fit."),
+            tags$p("Positive concentrations are required for a standard IC50 or EC50 fit. If your file includes a zero-dose control, the app keeps it for preview and linear-axis plotting but excludes it from the actual fit."),
             tags$p("The app does not assume a fixed unit. You can use nM, uM, ug/mL, mg/mL, or any other unit as long as the concentration column is numeric, then write the exact unit in the x-axis title."),
             tags$p("If you want GraphPad-like absolute normalization, choose 'Normalize using manual 0% and 100% controls' and enter the assay control responses used to define 100% and 0%."),
             tags$p("For the other-plots module, the x column can be categorical or numeric, the y column should be numeric, and the optional annotation column can contain letters or short labels to place above bars, boxes, or line points."),
@@ -3919,9 +4066,21 @@ server <- function(input, output, session) {
     updateCheckboxInput(session, "use_group_shapes", value = preset_values$use_group_shapes)
     updateCheckboxInput(session, "show_half_max_line", value = preset_values$show_half_max_line)
     updateNumericInput(session, "base_font_size", value = preset_values$base_font_size)
+    updateNumericInput(session, "legend_title_size", value = preset_values$base_font_size)
     updateNumericInput(session, "point_size", value = preset_values$point_size)
     updateNumericInput(session, "line_width", value = preset_values$line_width)
   }, ignoreInit = FALSE)
+
+  observeEvent(input$fit_to, ignoreInit = TRUE, {
+    if (identical(input$fit_to, "All observations") && !identical(input$weighting, "None")) {
+      updateSelectInput(session, "weighting", selected = "None")
+      showNotification(
+        "Weighting applies only to group means, so it was reset to None.",
+        type = "message",
+        duration = 5
+      )
+    }
+  })
 
   current_data <- reactive({
     if (identical(source_mode(), "example")) {
@@ -4196,6 +4355,12 @@ server <- function(input, output, session) {
     }
 
     note_parts <- c(analysis_result()$prepared$notes, analysis_result()$fit$message, comparison_note)
+    if (isTRUE(input$use_log10_axis) && isTRUE(analysis_result()$prepared$zero_dose_rows > 0)) {
+      note_parts <- c(
+        note_parts,
+        "Zero-dose rows are kept in the dataset preview but are excluded from fitting and are not shown on the log10 x-axis."
+      )
+    }
     note_parts <- note_parts[nzchar(note_parts)]
     paste(note_parts, collapse = " | ")
   })
