@@ -36,6 +36,9 @@ manual_control_normalization <- "Normalize using manual 0% and 100% controls"
 zero_dose_control_normalization <- "Normalize to zero-dose control (per group)"
 dose_scale_linear <- "Linear concentration values"
 dose_scale_log10 <- "Already log10-transformed concentration values"
+x_break_mode_automatic <- "Automatic"
+x_break_mode_measured <- "Measured concentrations"
+x_break_mode_custom <- "Custom"
 minimum_bootstrap_iterations <- 20L
 
 sample_dataset <- function() {
@@ -261,19 +264,20 @@ axis_display_values_to_plot_values <- function(values, use_log10_axis = FALSE, l
   plot_values
 }
 
-resolve_x_axis_breaks <- function(plot_df, explicit_breaks, use_log10_axis = FALSE, log10_label_mode = "Show concentration values", explicit_limits = NULL) {
-  breaks <- axis_display_values_to_plot_values(explicit_breaks, use_log10_axis = use_log10_axis, log10_label_mode = log10_label_mode)
-
-  if (is.null(breaks)) {
+resolve_x_axis_breaks <- function(plot_df, break_mode = x_break_mode_automatic, explicit_breaks = NULL, use_log10_axis = FALSE, log10_label_mode = "Show concentration values", explicit_limits = NULL) {
+  breaks <- NULL
+  if (identical(break_mode, x_break_mode_measured)) {
     if (nrow(plot_df)) {
-      breaks <- sort(unique(plot_df$dose[is.finite(plot_df$dose)]))
+      measured_breaks <- plot_df$dose[is.finite(plot_df$dose)]
       if (isTRUE(use_log10_axis)) {
-        breaks <- breaks[breaks > 0]
+        measured_breaks <- measured_breaks[measured_breaks > 0]
+      }
+      if (length(measured_breaks)) {
+        breaks <- sort(unique(measured_breaks))
       }
     }
-    if (!length(breaks)) {
-      breaks <- NULL
-    }
+  } else if (identical(break_mode, x_break_mode_custom)) {
+    breaks <- axis_display_values_to_plot_values(explicit_breaks, use_log10_axis = use_log10_axis, log10_label_mode = log10_label_mode)
   }
 
   if (!is.null(explicit_limits) && !is.null(breaks)) {
@@ -298,6 +302,105 @@ resolve_x_axis_limits <- function(explicit_limits, use_log10_axis = FALSE, log10
   }
 
   plot_limits
+}
+
+display_x_values <- function(x, use_log10_axis = FALSE) {
+  if (isTRUE(use_log10_axis)) {
+    return(log10(x))
+  }
+  x
+}
+
+curve_errorbar_segments <- function(error_df, use_log10_axis = FALSE, x_limits = NULL, cap_width_percent = 3) {
+  if (!nrow(error_df)) {
+    empty_segments <- data.frame(
+      group = character(),
+      x = numeric(),
+      xend = numeric(),
+      y = numeric(),
+      yend = numeric(),
+      stringsAsFactors = FALSE
+    )
+    return(list(vertical = empty_segments, caps = empty_segments))
+  }
+
+  valid_rows <- is.finite(error_df$dose) & is.finite(error_df$response) &
+    is.finite(error_df$response_sd) &
+    (!isTRUE(use_log10_axis) | error_df$dose > 0)
+  error_df <- error_df[valid_rows, , drop = FALSE]
+  if (!nrow(error_df)) {
+    empty_segments <- data.frame(
+      group = character(),
+      x = numeric(),
+      xend = numeric(),
+      y = numeric(),
+      yend = numeric(),
+      stringsAsFactors = FALSE
+    )
+    return(list(vertical = empty_segments, caps = empty_segments))
+  }
+
+  cap_width_percent <- suppressWarnings(as.numeric(cap_width_percent %||% 3))
+  if (!is.finite(cap_width_percent) || cap_width_percent <= 0) {
+    cap_width_percent <- 3
+  }
+
+  display_range <- if (!is.null(x_limits) && length(x_limits) == 2) {
+    display_x_values(x_limits, use_log10_axis = use_log10_axis)
+  } else {
+    display_x_values(error_df$dose, use_log10_axis = use_log10_axis)
+  }
+  display_range <- range(display_range, na.rm = TRUE)
+  span <- diff(display_range)
+  if (!is.finite(span) || span <= 0) {
+    span <- if (isTRUE(use_log10_axis)) 1 else max(error_df$dose, na.rm = TRUE)
+  }
+  half_width_display <- span * (cap_width_percent / 100) / 2
+  if (!is.finite(half_width_display) || half_width_display <= 0) {
+    half_width_display <- if (isTRUE(use_log10_axis)) 0.02 else 0.1
+  }
+
+  center_display <- display_x_values(error_df$dose, use_log10_axis = use_log10_axis)
+  xmin <- if (isTRUE(use_log10_axis)) {
+    10^(center_display - half_width_display)
+  } else {
+    center_display - half_width_display
+  }
+  xmax <- if (isTRUE(use_log10_axis)) {
+    10^(center_display + half_width_display)
+  } else {
+    center_display + half_width_display
+  }
+
+  vertical <- data.frame(
+    group = error_df$group,
+    x = error_df$dose,
+    xend = error_df$dose,
+    y = error_df$response - error_df$response_sd,
+    yend = error_df$response + error_df$response_sd,
+    stringsAsFactors = FALSE
+  )
+  lower_caps <- data.frame(
+    group = error_df$group,
+    x = xmin,
+    xend = xmax,
+    y = error_df$response - error_df$response_sd,
+    yend = error_df$response - error_df$response_sd,
+    stringsAsFactors = FALSE
+  )
+  upper_caps <- data.frame(
+    group = error_df$group,
+    x = xmin,
+    xend = xmax,
+    y = error_df$response + error_df$response_sd,
+    yend = error_df$response + error_df$response_sd,
+    stringsAsFactors = FALSE
+  )
+
+  list(
+    vertical = vertical,
+    caps = rbind(lower_caps, upper_caps)
+  )
 }
 
 default_y_axis_settings <- function(prepared, fit_data, explicit_breaks, explicit_limits, normalization, response_transform) {
@@ -2973,6 +3076,7 @@ build_plot <- function(prepared, fit_data, input) {
   plot_raw_df <- if (isTRUE(input$use_log10_axis)) prepared$raw[prepared$raw$dose > 0, , drop = FALSE] else prepared$raw
   plot_summary_df <- if (isTRUE(input$use_log10_axis)) prepared$summary[prepared$summary$dose > 0, , drop = FALSE] else prepared$summary
 
+  x_break_mode <- input$x_break_mode %||% x_break_mode_automatic
   x_break_values <- parse_numeric_values(input$x_breaks)
   y_breaks <- parse_numeric_values(input$y_breaks)
   log10_label_mode <- input$log10_axis_label_mode %||% "Show log10(concentration) values"
@@ -2984,13 +3088,14 @@ build_plot <- function(prepared, fit_data, input) {
   )
   x_breaks <- resolve_x_axis_breaks(
     plot_df = if (nrow(plot_summary_df)) plot_summary_df else plot_raw_df,
+    break_mode = x_break_mode,
     explicit_breaks = x_break_values,
     use_log10_axis = isTRUE(input$use_log10_axis),
     log10_label_mode = log10_label_mode,
     explicit_limits = x_limits
   )
   y_limits <- parse_axis_limits(input$y_limits)
-  log10_axis_labels <- if (identical(log10_label_mode, "Show log10(concentration) values")) {
+  x_axis_label_function <- if (isTRUE(input$use_log10_axis) && identical(log10_label_mode, "Show log10(concentration) values")) {
     format_log10_axis_labels
   } else {
     format_axis_labels
@@ -3055,20 +3160,27 @@ build_plot <- function(prepared, fit_data, input) {
   if (isTRUE(input$show_errorbars)) {
     errorbar_df <- plot_summary_df[is.finite(plot_summary_df$response_sd), ]
     if (nrow(errorbar_df) > 0) {
-      p <- p + geom_errorbar(
-        data = errorbar_df,
-        aes(
-          x = dose,
-          y = response,
-          ymin = response - response_sd,
-          ymax = response + response_sd,
-          color = group
-        ),
-        width = 0.04,
-        alpha = 0.65,
-        size = max(0.3, input$line_width * 0.7),
-        show.legend = FALSE
+      errorbar_segments <- curve_errorbar_segments(
+        error_df = errorbar_df,
+        use_log10_axis = isTRUE(input$use_log10_axis),
+        x_limits = x_limits,
+        cap_width_percent = input$errorbar_cap_width_pct
       )
+      p <- p +
+        geom_segment(
+          data = errorbar_segments$vertical,
+          aes(x = x, xend = xend, y = y, yend = yend, color = group),
+          alpha = 0.65,
+          size = max(0.3, input$line_width * 0.7),
+          show.legend = FALSE
+        ) +
+        geom_segment(
+          data = errorbar_segments$caps,
+          aes(x = x, xend = xend, y = y, yend = yend, color = group),
+          alpha = 0.65,
+          size = max(0.3, input$line_width * 0.7),
+          show.legend = FALSE
+        )
     }
   }
 
@@ -3159,13 +3271,13 @@ build_plot <- function(prepared, fit_data, input) {
   if (isTRUE(input$use_log10_axis)) {
     p <- p + scale_x_log10(
       breaks = if (is.null(x_breaks)) waiver() else x_breaks,
-      labels = if (is.null(x_breaks)) waiver() else log10_axis_labels,
+      labels = x_axis_label_function,
       limits = x_limits
     )
   } else {
     p <- p + scale_x_continuous(
       breaks = if (is.null(x_breaks)) waiver() else x_breaks,
-      labels = if (is.null(x_breaks)) waiver() else format_axis_labels,
+      labels = x_axis_label_function,
       limits = x_limits
     )
   }
@@ -4214,6 +4326,8 @@ ui <- fluidPage(
           checkboxInput("facet_by_group", "Facet by group", value = FALSE),
           numericInput("base_font_size", "Base font size", value = 12, min = 8, max = 30, step = 1),
           numericInput("point_size", "Point size", value = 3.5, min = 1, max = 8, step = 0.25),
+          numericInput("errorbar_cap_width_pct", "Error bar cap width (% of x-axis span)", value = 3, min = 0.5, max = 20, step = 0.5),
+          helpText("This controls the visual cap width, so it stays consistent across different x-axis scales."),
           numericInput("line_width", "Curve line width", value = 1.1, min = 0.4, max = 3, step = 0.1)
         ),
         tags$details(
@@ -4283,8 +4397,18 @@ ui <- fluidPage(
           class = "well",
           tags$summary("Curve plot axis breaks and limits"),
           br(),
-          textInput("x_breaks", "Custom x breaks", value = "", placeholder = "Blank = tested concentrations"),
-          helpText("Custom x breaks follow the numbers shown on the axis. If log10(concentration) labels are shown, enter log10 values such as 1.10, 1.40, 2.00."),
+          selectInput(
+            "x_break_mode",
+            "X-axis breaks",
+            choices = c(x_break_mode_automatic, x_break_mode_measured, x_break_mode_custom),
+            selected = x_break_mode_automatic
+          ),
+          helpText("Automatic uses standard axis spacing. Measured concentrations uses the tested doses. Custom follows the numbers shown on the axis."),
+          conditionalPanel(
+            condition = sprintf("input.x_break_mode === '%s'", x_break_mode_custom),
+            textInput("x_breaks", "Custom x breaks", value = "", placeholder = "e.g. 1.10, 1.40, 2.00"),
+            helpText("If log10(concentration) labels are shown, enter log10 values such as 1.10, 1.40, 2.00. If concentration labels are shown, enter concentration values.")
+          ),
           textInput("y_breaks", "Custom y breaks", value = "", placeholder = "e.g. 0, 25, 50, 75, 100"),
           textInput("x_limits", "X-axis limits", value = "", placeholder = "Use the same scale shown on the x-axis"),
           textInput("y_limits", "Y-axis limits", value = "", placeholder = "e.g. 0, 100")
