@@ -33,6 +33,9 @@ all_model_choices <- c(
   "3PL (Top = 100)"
 )
 manual_control_normalization <- "Normalize using manual 0% and 100% controls"
+zero_dose_control_normalization <- "Normalize to zero-dose control (per group)"
+dose_scale_linear <- "Linear concentration values"
+dose_scale_log10 <- "Already log10-transformed concentration values"
 minimum_bootstrap_iterations <- 20L
 
 sample_dataset <- function() {
@@ -99,6 +102,42 @@ guess_column <- function(data, patterns, fallback = NULL) {
   fallback %||% nm[1]
 }
 
+guess_dose_scale <- function(data, dose_col = NULL) {
+  if (is.null(dose_col) || !dose_col %in% names(data)) {
+    return(dose_scale_linear)
+  }
+
+  column_name <- tolower(dose_col %||% "")
+  dose_values <- suppressWarnings(as.numeric(data[[dose_col]]))
+  dose_values <- dose_values[is.finite(dose_values)]
+  if (!length(dose_values)) {
+    return(dose_scale_linear)
+  }
+
+  if (grepl("log", column_name, fixed = TRUE) || any(dose_values < 0, na.rm = TRUE)) {
+    return(dose_scale_log10)
+  }
+
+  dose_scale_linear
+}
+
+convert_uploaded_dose_to_linear <- function(dose_values, dose_scale = dose_scale_linear) {
+  if (identical(dose_scale, dose_scale_log10)) {
+    return(10^dose_values)
+  }
+
+  if (identical(dose_scale, dose_scale_linear)) {
+    return(dose_values)
+  }
+
+  stop(sprintf("Unknown concentration scale: %s", dose_scale))
+}
+
+uses_min_max_normalization <- function(mode) {
+  identical(mode, "Normalize 0 to 100 (min to max)") ||
+    identical(mode, "Normalize 100 to 0 (max to min)")
+}
+
 normalize_vector <- function(x, mode, control_100 = NA_real_, control_0 = NA_real_) {
   if (mode == "Raw values") {
     return(x)
@@ -125,7 +164,37 @@ normalize_vector <- function(x, mode, control_100 = NA_real_, control_0 = NA_rea
     return(100 - scaled)
   }
 
-  scaled
+  if (mode == "Normalize 0 to 100 (min to max)") {
+    return(scaled)
+  }
+
+  stop(sprintf("Unknown response scaling mode: %s", mode))
+}
+
+normalize_to_zero_dose_control <- function(piece) {
+  group_name <- as.character(piece$group[1] %||% "Series 1")
+  zero_control_values <- piece$response[piece$dose == 0 & is.finite(piece$response)]
+
+  if (!length(zero_control_values)) {
+    stop(sprintf(
+      "Zero-dose control normalization needs at least one concentration = 0 row in group '%s'.",
+      group_name
+    ))
+  }
+
+  zero_control_mean <- mean(zero_control_values, na.rm = TRUE)
+  if (!is.finite(zero_control_mean) || abs(zero_control_mean) <= .Machine$double.eps) {
+    stop(sprintf(
+      "Zero-dose control normalization needs a non-zero mean response at concentration 0 in group '%s'.",
+      group_name
+    ))
+  }
+
+  list(
+    response = piece$response / zero_control_mean * 100,
+    control_mean = zero_control_mean,
+    control_n = length(zero_control_values)
+  )
 }
 
 transform_response_vector <- function(x, mode) {
@@ -234,6 +303,15 @@ curve_grid_values <- function(x, curve_points, use_log10_axis, extend_curve_towa
 
 format_axis_labels <- function(x) {
   format(signif(x, 4), trim = TRUE, scientific = FALSE)
+}
+
+format_log10_axis_labels <- function(x) {
+  out <- rep(NA_character_, length(x))
+  valid_mask <- is.finite(x) & x > 0
+  if (any(valid_mask)) {
+    out[valid_mask] <- formatC(log10(x[valid_mask]), format = "f", digits = 2)
+  }
+  out
 }
 
 format_signif_text <- function(x, digits = 4) {
@@ -386,11 +464,11 @@ format_problem_groups <- function(diagnostics_df, max_groups = 4) {
   paste(labels, collapse = ", ")
 }
 
-prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, normalization = "Raw values", response_transform = "As entered", control_100 = NA_real_, control_0 = NA_real_) {
+prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, normalization = "Raw values", response_transform = "As entered", control_100 = NA_real_, control_0 = NA_real_, dose_scale = dose_scale_linear) {
   df <- data
   selected_group <- group_col
 
-  df$dose <- suppressWarnings(as.numeric(df[[dose_col]]))
+  df$dose_loaded <- suppressWarnings(as.numeric(df[[dose_col]]))
   df$response <- suppressWarnings(as.numeric(df[[response_col]]))
   df$group <- if (is.null(selected_group) || identical(selected_group, "None")) {
     "Series 1"
@@ -399,30 +477,54 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
   }
 
   original_n <- nrow(df)
-  df <- df[is.finite(df$dose) & is.finite(df$response) & nzchar(df$group), c("group", "dose", "response")]
+  df <- df[is.finite(df$dose_loaded) & is.finite(df$response) & nzchar(df$group), c("group", "dose_loaded", "response")]
   removed_non_numeric <- original_n - nrow(df)
 
-  removed_negative <- sum(df$dose < 0, na.rm = TRUE)
-  zero_dose_rows <- sum(df$dose == 0, na.rm = TRUE)
-  df <- df[df$dose >= 0, , drop = FALSE]
+  if (identical(dose_scale, dose_scale_log10)) {
+    df$dose <- convert_uploaded_dose_to_linear(df$dose_loaded, dose_scale = dose_scale)
+    removed_negative <- 0L
+    zero_dose_rows <- 0L
+    removed_invalid_after_conversion <- sum(!is.finite(df$dose) | df$dose <= 0, na.rm = TRUE)
+    df <- df[is.finite(df$dose) & df$dose > 0, c("group", "dose", "response"), drop = FALSE]
+  } else {
+    removed_negative <- sum(df$dose_loaded < 0, na.rm = TRUE)
+    zero_dose_rows <- sum(df$dose_loaded == 0, na.rm = TRUE)
+    df$dose <- convert_uploaded_dose_to_linear(df$dose_loaded, dose_scale = dose_scale)
+    removed_invalid_after_conversion <- 0L
+    df <- df[df$dose >= 0, c("group", "dose", "response"), drop = FALSE]
+  }
 
   if (nrow(df) == 0) {
+    if (identical(dose_scale, dose_scale_log10)) {
+      stop("No valid rows left after filtering. Log10 concentration values must convert to positive concentrations.")
+    }
     stop("No valid rows left after filtering. Dose values must be numeric and zero or greater.")
   }
 
   split_groups <- split(df, df$group)
   norm_results <- lapply(split_groups, function(piece) {
     flat_normalized <- FALSE
-    if (!identical(normalization, "Raw values") &&
-        !identical(normalization, manual_control_normalization)) {
-      response_span <- max(piece$response, na.rm = TRUE) - min(piece$response, na.rm = TRUE)
-      flat_normalized <- !is.finite(response_span) || response_span <= 0
+    zero_control_mean <- NA_real_
+    zero_control_n <- 0L
+
+    if (identical(normalization, zero_dose_control_normalization)) {
+      zero_control_info <- normalize_to_zero_dose_control(piece)
+      piece$response <- zero_control_info$response
+      zero_control_mean <- zero_control_info$control_mean
+      zero_control_n <- zero_control_info$control_n
+    } else {
+      if (uses_min_max_normalization(normalization)) {
+        response_span <- max(piece$response, na.rm = TRUE) - min(piece$response, na.rm = TRUE)
+        flat_normalized <- !is.finite(response_span) || response_span <= 0
+      }
+      piece$response <- normalize_vector(piece$response, normalization, control_100 = control_100, control_0 = control_0)
     }
-    piece$response <- normalize_vector(piece$response, normalization, control_100 = control_100, control_0 = control_0)
     piece$response <- transform_response_vector(piece$response, response_transform)
     list(
       piece = piece,
       flat_normalized = flat_normalized,
+      zero_control_mean = zero_control_mean,
+      zero_control_n = zero_control_n,
       group = as.character(piece$group[1])
     )
   })
@@ -462,13 +564,32 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
   notes <- c(
     sprintf("Rows loaded: %s", original_n),
     sprintf("Removed non-numeric rows: %s", removed_non_numeric),
-    sprintf("Removed rows with dose < 0: %s", removed_negative),
-    sprintf("Zero-dose rows retained for preview/linear plots but excluded from fitting: %s", zero_dose_rows),
+    sprintf("Uploaded concentration scale: %s", dose_scale),
     sprintf("Groups detected: %s", length(unique(df$group))),
     sprintf("Groups fit-ready (>=4 distinct doses): %s", sum(diagnostics_df$can_fit)),
     sprintf("Normalization: %s", normalization),
-    sprintf("Response transform: %s", response_transform)
+    sprintf("Response transform: %s", response_transform),
+    "IC50 or EC50 is reported in linear concentration units. If the uploaded concentration column is already log10-transformed, the app converts it back to linear concentration before fitting and reporting."
   )
+
+  if (identical(dose_scale, dose_scale_log10)) {
+    notes <- c(
+      notes,
+      "Uploaded log10 concentration values were converted back to linear concentrations for fitting, plotting, and IC50 or EC50 reporting."
+    )
+    if (removed_invalid_after_conversion > 0) {
+      notes <- c(
+        notes,
+        sprintf("Removed rows whose uploaded log10 concentrations did not convert to positive finite concentrations: %s", removed_invalid_after_conversion)
+      )
+    }
+  } else {
+    notes <- c(
+      notes,
+      sprintf("Removed rows with dose < 0: %s", removed_negative),
+      sprintf("Zero-dose rows retained in the dataset preview and excluded from fitting: %s", zero_dose_rows)
+    )
+  }
 
   if (identical(normalization, manual_control_normalization)) {
     notes <- c(
@@ -477,6 +598,43 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
         "Manual control normalization: 100%% control = %s, 0%% control = %s. Formula used: 100 * (Y - control_0) / (control_100 - control_0).",
         format_decimal_text(control_100, 4),
         format_decimal_text(control_0, 4)
+      )
+    )
+  }
+
+  if (identical(normalization, zero_dose_control_normalization)) {
+    zero_control_details <- vapply(
+      norm_results,
+      function(result) {
+        sprintf(
+          "%s (n = %s, mean = %s)",
+          result$group,
+          result$zero_control_n,
+          format_decimal_text(result$zero_control_mean, 4)
+        )
+      },
+      character(1)
+    )
+    if (length(zero_control_details) > 6) {
+      zero_control_details <- c(
+        zero_control_details[seq_len(6)],
+        sprintf("and %s more", length(zero_control_details) - 6)
+      )
+    }
+    notes <- c(
+      notes,
+      paste0(
+        "Zero-dose control normalization: each group was scaled as 100 * response / mean(response at concentration 0). Controls used: ",
+        paste(zero_control_details, collapse = "; "),
+        "."
+      )
+    )
+  } else if (zero_dose_rows > 0) {
+    notes <- c(
+      notes,
+      sprintf(
+        "If you want to scale responses relative to concentration 0 controls, choose '%s'.",
+        zero_dose_control_normalization
       )
     )
   }
@@ -2758,6 +2916,14 @@ build_plot <- function(prepared, fit_data, input) {
   y_breaks <- parse_numeric_values(input$y_breaks)
   x_limits <- parse_axis_limits(input$x_limits)
   y_limits <- parse_axis_limits(input$y_limits)
+  log10_label_mode <- input$log10_axis_label_mode %||% "Show concentration values"
+  log10_axis_labels <- if (identical(log10_label_mode, "Show log10(concentration) values")) {
+    format_log10_axis_labels
+  } else if (is.null(x_breaks)) {
+    waiver()
+  } else {
+    format_axis_labels
+  }
   y_axis_settings <- default_y_axis_settings(
     prepared = prepared,
     fit_data = fit_data,
@@ -2922,7 +3088,7 @@ build_plot <- function(prepared, fit_data, input) {
   if (isTRUE(input$use_log10_axis)) {
     p <- p + scale_x_log10(
       breaks = if (is.null(x_breaks)) waiver() else x_breaks,
-      labels = if (is.null(x_breaks)) waiver() else format_axis_labels,
+      labels = log10_axis_labels,
       limits = x_limits
     )
   } else {
@@ -3807,9 +3973,14 @@ ui <- fluidPage(
               "Raw values",
               "Normalize 0 to 100 (min to max)",
               "Normalize 100 to 0 (max to min)",
+              zero_dose_control_normalization,
               manual_control_normalization
             ),
             selected = "Raw values"
+          ),
+          conditionalPanel(
+            condition = sprintf("input.normalization === '%s'", zero_dose_control_normalization),
+            helpText("Uses the mean response at concentration 0 within each group as 100%. Formula: 100 * Y / mean(Y at concentration 0). Zero-dose rows stay excluded from the nonlinear fit.")
           ),
           conditionalPanel(
             condition = sprintf("input.normalization === '%s'", manual_control_normalization),
@@ -3884,6 +4055,15 @@ ui <- fluidPage(
             selected = "Custom"
           ),
           checkboxInput("use_log10_axis", "Use log10 concentration axis", value = TRUE),
+          conditionalPanel(
+            condition = "input.use_log10_axis",
+            selectInput(
+              "log10_axis_label_mode",
+              "Log10 axis labels",
+              choices = c("Show concentration values", "Show log10(concentration) values"),
+              selected = "Show log10(concentration) values"
+            )
+          ),
           checkboxInput("extend_curve_toward_zero", "Extend fitted curve toward zero-dose baseline", value = FALSE),
           numericInput("extra_log_decades", "Extra log10 decades below the minimum dose", value = 1, min = 0, max = 4, step = 0.25),
           checkboxInput("show_ic50_guides", "Show IC50 guide lines", value = FALSE),
@@ -4129,7 +4309,9 @@ ui <- fluidPage(
             h4("Data format"),
             tags$p("Supported files: CSV, TSV, TXT, XLS, XLSX."),
             tags$p("Recommended columns: one numeric concentration or dose column, one numeric response column, and an optional grouping column such as compound, sample, treatment, or replicate set."),
-            tags$p("Positive concentrations are required for a standard IC50 or EC50 fit. If your file includes a zero-dose control, the app keeps it for preview and linear-axis plotting but excludes it from the actual fit."),
+            tags$p("The app accepts either linear concentration values such as 0.01, 0.1, 1, or 10, or already log10-transformed concentration values such as -2, -1, 0, or 1. Use the 'Uploaded concentration values' selector in Column mapping so the app can interpret the dose column correctly."),
+            tags$p("IC50 or EC50 is always reported back in linear concentration units. If the uploaded concentration column is already log10-transformed, the app converts it back to linear concentration before fitting, plotting, and reporting."),
+            tags$p("If your file includes a zero-dose control, the app keeps it in the preview, excludes it from the nonlinear fit, and can use it for 'Normalize to zero-dose control (per group)' when the uploaded dose column is in linear concentration units."),
             tags$p("The app does not assume a fixed unit. You can use nM, uM, ug/mL, mg/mL, or any other unit as long as the concentration column is numeric, then write the exact unit in the x-axis title."),
             tags$p("If you want GraphPad-like absolute normalization, choose 'Normalize using manual 0% and 100% controls' and enter the assay control responses used to define 100% and 0%."),
             tags$p("For the other-plots module, the x column can be categorical or numeric, the y column should be numeric, and the optional annotation column can contain letters or short labels to place above bars, boxes, or line points."),
@@ -4295,6 +4477,14 @@ server <- function(input, output, session) {
     df <- current_data()
     nm <- names(df)
     req(length(nm) > 0)
+    selected_dose_col <- isolate(input$dose_col)
+    if (is.null(selected_dose_col) || !selected_dose_col %in% nm) {
+      selected_dose_col <- guess_column(df, c("dose", "conc", "concentration", "um", "nm"), nm[1])
+    }
+    selected_dose_scale <- isolate(input$dose_scale)
+    if (is.null(selected_dose_scale) || !selected_dose_scale %in% c(dose_scale_linear, dose_scale_log10)) {
+      selected_dose_scale <- guess_dose_scale(df, selected_dose_col)
+    }
 
     tagList(
       h4("Column mapping"),
@@ -4302,8 +4492,15 @@ server <- function(input, output, session) {
         "dose_col",
         "Concentration or dose column",
         choices = nm,
-        selected = guess_column(df, c("dose", "conc", "concentration", "um", "nm"), nm[1])
+        selected = selected_dose_col
       ),
+      selectInput(
+        "dose_scale",
+        "Uploaded concentration values",
+        choices = c(dose_scale_linear, dose_scale_log10),
+        selected = selected_dose_scale
+      ),
+      helpText("Choose linear for values like 0.01, 0.1, 1, or 10. Choose log10-transformed for values like -2, -1, 0, 1 or 1.10, 1.40, 1.70. The app reports IC50 or EC50 back in linear concentration units."),
       selectInput(
         "response_col",
         "Response column",
@@ -4443,7 +4640,8 @@ server <- function(input, output, session) {
         normalization = input$normalization,
         response_transform = input$response_transform,
         control_100 = input$control_100_value %||% NA_real_,
-        control_0 = input$control_0_value %||% NA_real_
+        control_0 = input$control_0_value %||% NA_real_,
+        dose_scale = input$dose_scale %||% dose_scale_linear
       )
 
       comparison <- NULL
@@ -4543,7 +4741,7 @@ server <- function(input, output, session) {
     if (isTRUE(input$use_log10_axis) && isTRUE(result$prepared$zero_dose_rows > 0)) {
       note_parts <- c(
         note_parts,
-        "Zero-dose rows are kept in the dataset preview but are excluded from fitting and are not shown on the log10 x-axis."
+        "Zero-dose rows stay excluded from fitting. On the log10 x-axis they are hidden, but they can still be used for zero-dose control normalization."
       )
     }
     note_parts <- note_parts[nzchar(note_parts)]
