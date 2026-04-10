@@ -286,13 +286,15 @@ For the dose-response workflow:
 - rows with missing group labels are removed
 - negative doses are removed
 - zero-dose rows are kept for preview and linear plots
-- zero-dose rows are excluded from the actual fit
+- zero-dose rows are excluded from the actual fit unless you enable `Include zero-dose rows in fitting`, which replaces concentration `0` with a small positive surrogate for log-style fitting
 
 ### Important rule for fitting
 
-Each fitted group needs at least `4` distinct positive dose values.
+Each fitted group needs at least `4` distinct dose values used for fitting.
 
-If a group has fewer than `4` distinct positive doses:
+By default the app counts only positive doses. If you enable `Include zero-dose rows in fitting`, concentration `0` can count as one of those levels.
+
+If a group has fewer than `4` distinct fitted doses:
 
 - it stays visible in previews
 - it is counted in diagnostic notes
@@ -318,8 +320,9 @@ Zero-dose rows are often useful as assay controls or baseline observations. The 
 - they remain in the summarized data preview
 - they can appear in the `Other Plots` module
 - they can appear in linear-axis curve displays
-- they are excluded from the mathematical fit itself
-- they cannot be shown at x = 0 on a log axis because log-scale plots cannot display zero
+- by default they are excluded from the mathematical fit itself
+- they can be included in the mathematical fit when `Include zero-dose rows in fitting` is enabled for linear concentration data, using a small positive surrogate value
+- they cannot be shown at x = 0 on a log axis because log-scale plots cannot display zero, even when they are included in the fit
 
 ### Raw replicates versus summarized means
 
@@ -875,6 +878,15 @@ Presets quickly coordinate style choices. If you want fine control afterward, sw
 #### `Use log10 concentration axis`
 
 Recommended for many dose-response figures because it spreads low and high concentrations more naturally.
+
+#### `Include zero-dose rows in fitting`
+
+Useful when:
+
+- your linear-concentration dataset includes control rows at `x = 0`
+- the zero-dose baseline should help anchor the fitted top or bottom, similar to GraphPad's include-zero option
+
+The app replaces concentration `0` with a small positive surrogate one log10 decade below the minimum positive concentration. On log-scale plots, those rows can influence the fit and appear at that surrogate position, but they still cannot be drawn at literal `x = 0`.
 
 #### `Extend fitted curve toward zero-dose baseline`
 
@@ -1475,6 +1487,8 @@ If you need to see zero-dose rows:
 - use a linear axis
 - check the `Data Preview` tables
 - use the `Other Plots` tab if the goal is a descriptive figure rather than a curve fit
+
+If `Include zero-dose rows in fitting` is enabled, the zero-dose rows can affect the fitted parameters and appear at the surrogate log-scale position, even though the plot still cannot draw a point at literal `x = 0`.
 
 ### Weighting is not staying enabled
 

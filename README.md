@@ -69,12 +69,12 @@ Important behavior:
 
 - Negative doses are removed.
 - The app accepts either linear concentrations such as `0.01`, `0.1`, `1`, or `10`, or already `log10`-transformed values such as `-2`, `-1`, `0`, or `1`. Use `Uploaded concentration values` to match your file.
-- Zero-dose rows in linear-concentration files are kept in the preview, excluded from the nonlinear fit, and can be used for `Normalize to zero-dose control (per group)`.
-- Each fitted group needs at least `4` distinct positive dose values after any log10-to-linear conversion.
+- Zero-dose rows in linear-concentration files are kept in the preview and can be used for `Normalize to zero-dose control (per group)`. By default they stay out of the nonlinear fit, but you can turn on `Include zero-dose rows in fitting` to replace concentration `0` with a small positive surrogate one log10 decade below the minimum positive concentration.
+- Each fitted group needs at least `4` distinct dose values used for fitting after any log10-to-linear conversion. By default the app counts only positive doses; when `Include zero-dose rows in fitting` is enabled, concentration `0` can count as one of those levels.
 - The app does not assume a fixed concentration unit. You can use `nM`, `uM`, `ug/mL`, `mg/mL`, or any other unit as long as the dose column is numeric.
 - `IC50` and `EC50` are always reported in linear concentration units, even when the uploaded concentration column is already log10-transformed.
 - If you choose `Normalize using manual 0% and 100% controls`, the app applies `100 * (Y - control_0) / (control_100 - control_0)`.
-- If you choose `Normalize to zero-dose control (per group)`, the app applies `100 * Y / mean(Y at concentration 0)` within each group.
+- If you choose `Normalize to zero-dose control (per group)`, the app applies `100 * Y / mean(Y at concentration 0)` when the zero-dose mean is non-zero. If that mean is `0`, the app keeps the zero-dose response as the `0%` baseline and maps the strongest observed response away from it to `100%`.
 
 An example file is included at [example_dose_response.csv](example_dose_response.csv).
 

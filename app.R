@@ -177,8 +177,9 @@ normalize_vector <- function(x, mode, control_100 = NA_real_, control_0 = NA_rea
 normalize_to_zero_dose_control <- function(piece) {
   group_name <- as.character(piece$group[1] %||% "Series 1")
   zero_control_values <- piece$response[piece$dose == 0 & is.finite(piece$response)]
+  zero_control_n <- length(zero_control_values)
 
-  if (!length(zero_control_values)) {
+  if (!zero_control_n) {
     stop(sprintf(
       "Zero-dose control normalization needs at least one concentration = 0 row in group '%s'.",
       group_name
@@ -186,17 +187,52 @@ normalize_to_zero_dose_control <- function(piece) {
   }
 
   zero_control_mean <- mean(zero_control_values, na.rm = TRUE)
-  if (!is.finite(zero_control_mean) || abs(zero_control_mean) <= .Machine$double.eps) {
+  if (!is.finite(zero_control_mean)) {
     stop(sprintf(
-      "Zero-dose control normalization needs a non-zero mean response at concentration 0 in group '%s'.",
+      "Zero-dose control normalization needs a finite mean response at concentration 0 in group '%s'.",
       group_name
     ))
   }
 
+  if (abs(zero_control_mean) > .Machine$double.eps) {
+    return(list(
+      response = piece$response / zero_control_mean * 100,
+      control_mean = zero_control_mean,
+      control_n = zero_control_n,
+      strategy = "zero_as_100",
+      scale_value = zero_control_mean
+    ))
+  }
+
+  centered_response <- piece$response - zero_control_mean
+  upper_span <- max(centered_response, na.rm = TRUE)
+  lower_span <- abs(min(centered_response, na.rm = TRUE))
+  upper_span <- if (is.finite(upper_span)) upper_span else 0
+  lower_span <- if (is.finite(lower_span)) lower_span else 0
+
+  if (upper_span <= .Machine$double.eps && lower_span <= .Machine$double.eps) {
+    stop(sprintf(
+      "Zero-dose control normalization needs variation away from concentration 0 in group '%s'.",
+      group_name
+    ))
+  }
+
+  if (upper_span >= lower_span && upper_span > .Machine$double.eps) {
+    return(list(
+      response = centered_response / upper_span * 100,
+      control_mean = zero_control_mean,
+      control_n = zero_control_n,
+      strategy = "zero_as_0_up",
+      scale_value = zero_control_mean + upper_span
+    ))
+  }
+
   list(
-    response = piece$response / zero_control_mean * 100,
+    response = (-centered_response) / lower_span * 100,
     control_mean = zero_control_mean,
-    control_n = length(zero_control_values)
+    control_n = zero_control_n,
+    strategy = "zero_as_0_down",
+    scale_value = zero_control_mean - lower_span
   )
 }
 
@@ -447,21 +483,32 @@ default_y_axis_settings <- function(prepared, fit_data, explicit_breaks, explici
 }
 
 curve_grid_values <- function(x, curve_points, use_log10_axis, extend_curve_toward_zero = FALSE, extra_log_decades = 1) {
-  min_x <- min(x, na.rm = TRUE)
-  max_x <- max(x, na.rm = TRUE)
-
-  if (!isTRUE(extend_curve_toward_zero)) {
-    lower_bound <- min_x
-  } else if (isTRUE(use_log10_axis)) {
-    lower_bound <- max(min_x / (10^max(extra_log_decades, 0)), .Machine$double.eps)
-  } else {
-    lower_bound <- 0
+  finite_x <- x[is.finite(x)]
+  if (!length(finite_x)) {
+    return(numeric())
   }
+
+  min_x <- min(finite_x, na.rm = TRUE)
+  max_x <- max(finite_x, na.rm = TRUE)
 
   if (isTRUE(use_log10_axis)) {
-    return(exp(seq(log(lower_bound), log(max_x), length.out = curve_points)))
+    positive_x <- finite_x[finite_x > 0]
+    if (!length(positive_x)) {
+      return(numeric())
+    }
+
+    min_positive_x <- min(positive_x, na.rm = TRUE)
+    max_positive_x <- max(positive_x, na.rm = TRUE)
+    lower_bound <- if (!isTRUE(extend_curve_toward_zero)) {
+      min_positive_x
+    } else {
+      max(min_positive_x / (10^max(extra_log_decades, 0)), .Machine$double.eps)
+    }
+
+    return(exp(seq(log(lower_bound), log(max_positive_x), length.out = curve_points)))
   }
 
+  lower_bound <- if (!isTRUE(extend_curve_toward_zero)) min_x else 0
   seq(lower_bound, max_x, length.out = curve_points)
 }
 
@@ -586,9 +633,10 @@ compute_summary <- function(df) {
     ))
   }
 
+  has_dose_fit <- "dose_fit" %in% names(df)
   split_rows <- split(df, interaction(df$group, df$dose, drop = TRUE, lex.order = TRUE))
   summary_list <- lapply(split_rows, function(piece) {
-    data.frame(
+    out <- data.frame(
       group = as.character(piece$group[1]),
       dose = piece$dose[1],
       response = mean(piece$response),
@@ -596,6 +644,10 @@ compute_summary <- function(df) {
       n = nrow(piece),
       stringsAsFactors = FALSE
     )
+    if (has_dose_fit) {
+      out$dose_fit <- piece$dose_fit[1]
+    }
+    out
   })
 
   merged <- do.call(rbind, summary_list)
@@ -628,7 +680,26 @@ format_problem_groups <- function(diagnostics_df, max_groups = 4) {
   paste(labels, collapse = ", ")
 }
 
-prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, normalization = "Raw values", response_transform = "As entered", control_100 = NA_real_, control_0 = NA_real_, dose_scale = dose_scale_linear) {
+zero_dose_fit_substitute <- function(dose_values, decades_below = 1) {
+  positive_doses <- dose_values[is.finite(dose_values) & dose_values > 0]
+  if (!length(positive_doses)) {
+    return(NA_real_)
+  }
+
+  decades_value <- suppressWarnings(as.numeric(decades_below))
+  if (!is.finite(decades_value)) {
+    decades_value <- 1
+  }
+
+  substitute <- min(positive_doses, na.rm = TRUE) / (10^max(decades_value, 0))
+  if (!is.finite(substitute) || substitute <= 0) {
+    return(NA_real_)
+  }
+
+  substitute
+}
+
+prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, normalization = "Raw values", response_transform = "As entered", control_100 = NA_real_, control_0 = NA_real_, dose_scale = dose_scale_linear, include_zero_dose_in_fit = FALSE) {
   df <- data
   selected_group <- group_col
 
@@ -670,12 +741,16 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
     flat_normalized <- FALSE
     zero_control_mean <- NA_real_
     zero_control_n <- 0L
+    zero_control_strategy <- NA_character_
+    zero_control_scale_value <- NA_real_
 
     if (identical(normalization, zero_dose_control_normalization)) {
       zero_control_info <- normalize_to_zero_dose_control(piece)
       piece$response <- zero_control_info$response
       zero_control_mean <- zero_control_info$control_mean
       zero_control_n <- zero_control_info$control_n
+      zero_control_strategy <- zero_control_info$strategy
+      zero_control_scale_value <- zero_control_info$scale_value
     } else {
       if (uses_min_max_normalization(normalization)) {
         response_span <- max(piece$response, na.rm = TRUE) - min(piece$response, na.rm = TRUE)
@@ -689,6 +764,8 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
       flat_normalized = flat_normalized,
       zero_control_mean = zero_control_mean,
       zero_control_n = zero_control_n,
+      zero_control_strategy = zero_control_strategy,
+      zero_control_scale_value = zero_control_scale_value,
       group = as.character(piece$group[1])
     )
   })
@@ -702,9 +779,28 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
   df <- do.call(rbind, normalized_groups)
   rownames(df) <- NULL
 
-  fit_df <- df[df$dose > 0, , drop = FALSE]
-  if (nrow(fit_df) == 0) {
+  include_zero_dose_fit_rows <- isTRUE(include_zero_dose_in_fit) && !identical(dose_scale, dose_scale_log10)
+  zero_dose_fit_value <- if (isTRUE(include_zero_dose_fit_rows) && zero_dose_rows > 0) {
+    zero_dose_fit_substitute(df$dose, decades_below = 1)
+  } else {
+    NA_real_
+  }
+
+  if (isTRUE(include_zero_dose_fit_rows) && zero_dose_rows > 0 && !is.finite(zero_dose_fit_value)) {
+    stop("To include zero-dose rows in fitting, keep at least one positive concentration so the app can place the zero-dose surrogate below it.")
+  }
+
+  fit_df <- if (isTRUE(include_zero_dose_fit_rows)) {
+    df[df$dose >= 0, , drop = FALSE]
+  } else {
+    df[df$dose > 0, , drop = FALSE]
+  }
+  if (nrow(fit_df) == 0 || !any(fit_df$dose > 0, na.rm = TRUE)) {
     stop("No positive dose values remain for fitting. Keep at least one concentration above zero for IC50 or EC50 analysis.")
+  }
+  fit_df$dose_fit <- fit_df$dose
+  if (isTRUE(include_zero_dose_fit_rows) && is.finite(zero_dose_fit_value)) {
+    fit_df$dose_fit[fit_df$dose == 0] <- zero_dose_fit_value
   }
 
   summary_df <- compute_summary(df)
@@ -716,7 +812,10 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
     n_points = vapply(split_groups_all, nrow, integer(1)),
     distinct_doses = vapply(
       split_groups_all,
-      function(piece) length(unique(piece$dose[piece$dose > 0])),
+      function(piece) {
+        fit_mask <- if (isTRUE(include_zero_dose_fit_rows)) piece$dose >= 0 else piece$dose > 0
+        length(unique(piece$dose[fit_mask]))
+      },
       integer(1)
     ),
     stringsAsFactors = FALSE
@@ -751,8 +850,21 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
     notes <- c(
       notes,
       sprintf("Removed rows with dose < 0: %s", removed_negative),
-      sprintf("Zero-dose rows retained in the dataset preview and excluded from fitting: %s", zero_dose_rows)
+      sprintf(
+        "Zero-dose rows retained in the dataset preview and %s fitting: %s",
+        if (isTRUE(include_zero_dose_fit_rows)) "included in" else "excluded from",
+        zero_dose_rows
+      )
     )
+    if (isTRUE(include_zero_dose_fit_rows) && zero_dose_rows > 0) {
+      notes <- c(
+        notes,
+        sprintf(
+          "For fitting, concentration 0 was replaced with %s (one log10 decade below the minimum positive concentration). On log10 x-axis plots those rows are shown at that surrogate position.",
+          format_decimal_text(zero_dose_fit_value, 4)
+        )
+      )
+    }
   }
 
   if (identical(normalization, manual_control_normalization)) {
@@ -770,11 +882,31 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
     zero_control_details <- vapply(
       norm_results,
       function(result) {
+        if (identical(result$zero_control_strategy, "zero_as_100")) {
+          return(sprintf(
+            "%s (n = %s, mean at dose 0 = %s; scaled as 100 * Y / mean0)",
+            result$group,
+            result$zero_control_n,
+            format_decimal_text(result$zero_control_mean, 4)
+          ))
+        }
+
+        if (identical(result$zero_control_strategy, "zero_as_0_up")) {
+          return(sprintf(
+            "%s (n = %s, mean at dose 0 = %s; baseline kept at 0 and max observed response %s mapped to 100%%)",
+            result$group,
+            result$zero_control_n,
+            format_decimal_text(result$zero_control_mean, 4),
+            format_decimal_text(result$zero_control_scale_value, 4)
+          ))
+        }
+
         sprintf(
-          "%s (n = %s, mean = %s)",
+          "%s (n = %s, mean at dose 0 = %s; baseline kept at 0 and min observed response %s mapped to 100%%)",
           result$group,
           result$zero_control_n,
-          format_decimal_text(result$zero_control_mean, 4)
+          format_decimal_text(result$zero_control_mean, 4),
+          format_decimal_text(result$zero_control_scale_value, 4)
         )
       },
       character(1)
@@ -788,7 +920,7 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
     notes <- c(
       notes,
       paste0(
-        "Zero-dose control normalization: each group was scaled as 100 * response / mean(response at concentration 0). Controls used: ",
+        "Zero-dose control normalization: groups with a non-zero mean response at concentration 0 were scaled as 100 * response / mean(response at concentration 0). If the zero-dose mean was 0, that zero-dose baseline was kept at 0 and the strongest observed response away from it was mapped to 100. Controls used: ",
         paste(zero_control_details, collapse = "; "),
         "."
       )
@@ -831,6 +963,8 @@ prepare_dataset <- function(data, dose_col, response_col, group_col = NULL, norm
     fit_summary = fit_summary_df,
     diagnostics = diagnostics_df,
     zero_dose_rows = zero_dose_rows,
+    zero_dose_in_fit = isTRUE(include_zero_dose_fit_rows) && zero_dose_rows > 0,
+    zero_dose_fit_value = zero_dose_fit_value,
     notes = notes
   )
 }
@@ -1774,8 +1908,17 @@ format_ic50_report <- function(ic50_value, uncertainty_method, uncertainty_value
 }
 
 detect_direction_mismatch <- function(x, y, selected_direction) {
-  log_x <- log10(x)
-  corr <- suppressWarnings(stats::cor(log_x, y, method = "spearman", use = "complete.obs"))
+  valid_mask <- is.finite(x) & is.finite(y) & x > 0
+  if (sum(valid_mask) < 2) {
+    return(list(
+      spearman = NA_real_,
+      expected_direction = selected_direction,
+      mismatch = FALSE
+    ))
+  }
+
+  log_x <- log10(x[valid_mask])
+  corr <- suppressWarnings(stats::cor(log_x, y[valid_mask], method = "spearman", use = "complete.obs"))
   expected_direction <- if (is.finite(corr) && corr < 0) "Decreasing" else "Increasing"
   mismatch <- is.finite(corr) && !identical(expected_direction, selected_direction)
 
@@ -1789,8 +1932,9 @@ detect_direction_mismatch <- function(x, y, selected_direction) {
 assess_ic50_reliability <- function(df, params, ic50_value, direction, ic50_decimals = 2, potency_metric = "IC50") {
   observed_min <- min(df$response, na.rm = TRUE)
   observed_max <- max(df$response, na.rm = TRUE)
-  min_dose <- min(df$dose, na.rm = TRUE)
-  max_dose <- max(df$dose, na.rm = TRUE)
+  positive_doses <- df$dose[is.finite(df$dose) & df$dose > 0]
+  min_dose <- if (length(positive_doses)) min(positive_doses, na.rm = TRUE) else min(df$dose, na.rm = TRUE)
+  max_dose <- if (length(positive_doses)) max(positive_doses, na.rm = TRUE) else max(df$dose, na.rm = TRUE)
   target_response <- potency_target_response(params, potency_metric)
   target_reason <- potency_target_reason(potency_metric)
   target_phrase <- potency_target_phrase(potency_metric)
@@ -1865,8 +2009,11 @@ assess_ic50_reliability <- function(df, params, ic50_value, direction, ic50_deci
 }
 
 fit_single_group <- function(df, group_name, model, direction, weighting, curve_points, use_log10_axis = TRUE, extend_curve_toward_zero = FALSE, extra_log_decades = 1, ic50_decimals = 2, potency_metric = "IC50") {
+  x_fit <- if ("dose_fit" %in% names(df)) df$dose_fit else df$dose
+  x_display <- if (isTRUE(use_log10_axis) && "dose_fit" %in% names(df)) df$dose_fit else df$dose
+
   if (identical(direction, "Auto-detect")) {
-    direction_check <- detect_direction_mismatch(df$dose, df$response, "Increasing")
+    direction_check <- detect_direction_mismatch(x_fit, df$response, "Increasing")
     candidate_directions <- unique(c(direction_check$expected_direction, "Increasing", "Decreasing"))
     fit_attempts <- lapply(candidate_directions, function(candidate_direction) {
       try(
@@ -1913,7 +2060,7 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
     return(best_fit)
   }
 
-  x <- df$dose
+  x <- x_fit
   y <- df$response
   if (length(unique(x)) < 4) {
     stop(sprintf("Group '%s' has only %s distinct dose values; at least 4 are required.", group_name, length(unique(x))))
@@ -1937,7 +2084,11 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
     start_top <- max(y, na.rm = TRUE)
   }
 
-  dose_candidates <- unique(as.numeric(stats::quantile(x, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)))
+  dose_source <- x[is.finite(x) & x > 0]
+  if (!length(dose_source)) {
+    dose_source <- x[is.finite(x)]
+  }
+  dose_candidates <- unique(as.numeric(stats::quantile(dose_source, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)))
   hill_candidates <- if (identical(model, "3PL (Hill fixed = 1)")) 1 else c(0.5, 1, 1.5, 2)
   asymmetry_candidates <- if (identical(model, "5PL")) c(0.8, 1, 1.2) else 1
 
@@ -2002,7 +2153,7 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
   params <- decode_parameters(best_fit$par, model)
   fitted_values <- predict_curve(x, params, model, direction)
   grid <- curve_grid_values(
-    x = x,
+    x = if (isTRUE(use_log10_axis)) x else df$dose,
     curve_points = curve_points,
     use_log10_axis = use_log10_axis,
     extend_curve_toward_zero = extend_curve_toward_zero,
@@ -2078,7 +2229,7 @@ fit_single_group <- function(df, group_name, model, direction, weighting, curve_
     ),
     fitted = data.frame(
       group = group_name,
-      dose = x,
+      dose = x_display,
       observed = y,
       fitted = fitted_values,
       stringsAsFactors = FALSE
@@ -2475,8 +2626,7 @@ fit_dataset <- function(prepared, fit_to, model, direction, weighting, curve_poi
     if (fits[[group_name]]$result_row$fit_status[1] == "OK" &&
         !identical(uncertainty_method, "None") &&
         !identical(fits[[group_name]]$result_row$fit_reliability[1], reliability_target_not_reached)) {
-      raw_group_df <- prepared$raw[prepared$raw$group == group_name, , drop = FALSE]
-      raw_group_df <- raw_group_df[raw_group_df$dose > 0, , drop = FALSE]
+      raw_group_df <- prepared$fit_raw[prepared$fit_raw$group == group_name, , drop = FALSE]
       uncertainty_values <- estimate_ic50_uncertainty(
         raw_group_df = raw_group_df,
         group_name = group_name,
@@ -3073,8 +3223,23 @@ build_plot <- function(prepared, fit_data, input) {
   legend_labels <- format_legend_labels(groups, input$legend_label_decimals %||% 2)
   show_point_legend <- !identical(input$legend_content, "Lines only")
   show_line_legend <- !identical(input$legend_content, "Points only")
-  plot_raw_df <- if (isTRUE(input$use_log10_axis)) prepared$raw[prepared$raw$dose > 0, , drop = FALSE] else prepared$raw
-  plot_summary_df <- if (isTRUE(input$use_log10_axis)) prepared$summary[prepared$summary$dose > 0, , drop = FALSE] else prepared$summary
+  zero_dose_plot_value <- prepared$zero_dose_fit_value
+  plot_raw_df <- prepared$raw
+  plot_summary_df <- prepared$summary
+  break_raw_df <- if (isTRUE(input$use_log10_axis)) prepared$raw[prepared$raw$dose > 0, , drop = FALSE] else plot_raw_df
+  break_summary_df <- if (isTRUE(input$use_log10_axis)) prepared$summary[prepared$summary$dose > 0, , drop = FALSE] else plot_summary_df
+
+  if (isTRUE(input$use_log10_axis)) {
+    if (isTRUE(prepared$zero_dose_in_fit) && is.finite(zero_dose_plot_value)) {
+      plot_raw_df <- plot_raw_df[plot_raw_df$dose >= 0, , drop = FALSE]
+      plot_summary_df <- plot_summary_df[plot_summary_df$dose >= 0, , drop = FALSE]
+      plot_raw_df$dose[plot_raw_df$dose == 0] <- zero_dose_plot_value
+      plot_summary_df$dose[plot_summary_df$dose == 0] <- zero_dose_plot_value
+    } else {
+      plot_raw_df <- plot_raw_df[plot_raw_df$dose > 0, , drop = FALSE]
+      plot_summary_df <- plot_summary_df[plot_summary_df$dose > 0, , drop = FALSE]
+    }
+  }
 
   x_break_mode <- input$x_break_mode %||% x_break_mode_automatic
   x_break_values <- parse_numeric_values(input$x_breaks)
@@ -3087,13 +3252,33 @@ build_plot <- function(prepared, fit_data, input) {
     log10_label_mode = log10_label_mode
   )
   x_breaks <- resolve_x_axis_breaks(
-    plot_df = if (nrow(plot_summary_df)) plot_summary_df else plot_raw_df,
+    plot_df = if (nrow(break_summary_df)) break_summary_df else break_raw_df,
     break_mode = x_break_mode,
     explicit_breaks = x_break_values,
     use_log10_axis = isTRUE(input$use_log10_axis),
     log10_label_mode = log10_label_mode,
     explicit_limits = x_limits
   )
+  if (isTRUE(input$use_log10_axis) &&
+      isTRUE(prepared$zero_dose_in_fit) &&
+      is.finite(zero_dose_plot_value) &&
+      identical(x_break_mode, x_break_mode_automatic) &&
+      is.null(x_breaks)) {
+    break_source <- c(break_summary_df$dose, break_raw_df$dose)
+    break_source <- break_source[is.finite(break_source) & break_source > 0]
+    if (length(break_source)) {
+      x_breaks <- 10^pretty(log10(range(break_source, na.rm = TRUE)), n = 5)
+      x_breaks <- x_breaks[is.finite(x_breaks) & x_breaks >= min(break_source, na.rm = TRUE) & x_breaks <= max(break_source, na.rm = TRUE)]
+      if (!is.null(x_limits)) {
+        x_breaks <- x_breaks[x_breaks >= x_limits[1] & x_breaks <= x_limits[2]]
+      }
+      if (!length(x_breaks)) {
+        x_breaks <- NULL
+      } else {
+        x_breaks <- sort(unique(x_breaks))
+      }
+    }
+  }
   y_limits <- parse_axis_limits(input$y_limits)
   x_axis_label_function <- if (isTRUE(input$use_log10_axis) && identical(log10_label_mode, "Show log10(concentration) values")) {
     format_log10_axis_labels
@@ -4163,7 +4348,7 @@ ui <- fluidPage(
           ),
           conditionalPanel(
             condition = sprintf("input.normalization === '%s'", zero_dose_control_normalization),
-            helpText("Uses the mean response at concentration 0 within each group as 100%. Formula: 100 * Y / mean(Y at concentration 0). Zero-dose rows stay excluded from the nonlinear fit.")
+            helpText("If the mean response at concentration 0 is non-zero, the app scales each group as 100 * Y / mean(Y at concentration 0). If that mean is 0, the zero-dose value is treated as the 0% baseline and the strongest observed response away from it is mapped to 100%. The separate fitting option decides whether zero-dose rows also anchor the nonlinear fit.")
           ),
           conditionalPanel(
             condition = sprintf("input.normalization === '%s'", manual_control_normalization),
@@ -4204,6 +4389,8 @@ ui <- fluidPage(
           helpText("IC50 uses the response = 50 target. EC50 uses the half-max effect between the fitted bottom and top."),
           checkboxInput("compare_models", "Compare all models first (no bootstrap)", value = FALSE),
           helpText("Use this before bootstrap to see which equation gives the most reportable fits for your dataset."),
+          checkboxInput("include_zero_dose_in_fit", "Include zero-dose rows in fitting", value = FALSE),
+          helpText("Applies to linear concentration uploads. When enabled, concentration 0 rows are fit as a small positive surrogate one log10 decade below the minimum positive concentration, similar to GraphPad Prism's include-zero workflow for log fits."),
           selectInput(
             "weighting",
             "Weighting",
@@ -4511,7 +4698,7 @@ ui <- fluidPage(
             tags$p("Recommended columns: one numeric concentration or dose column, one numeric response column, and an optional grouping column such as compound, sample, treatment, or replicate set."),
             tags$p("The app accepts either linear concentration values such as 0.01, 0.1, 1, or 10, or already log10-transformed concentration values such as -2, -1, 0, or 1. Use the 'Uploaded concentration values' selector in Column mapping so the app can interpret the dose column correctly."),
             tags$p("IC50 or EC50 is always reported back in linear concentration units. If the uploaded concentration column is already log10-transformed, the app converts it back to linear concentration before fitting, plotting, and reporting."),
-            tags$p("If your file includes a zero-dose control, the app keeps it in the preview, excludes it from the nonlinear fit, and can use it for 'Normalize to zero-dose control (per group)' when the uploaded dose column is in linear concentration units."),
+            tags$p("If your file includes a zero-dose control, the app keeps it in the preview and can use it for 'Normalize to zero-dose control (per group)' when the uploaded dose column is in linear concentration units. By default those rows stay out of the nonlinear fit, but you can turn on 'Include zero-dose rows in fitting' to replace concentration 0 with a small positive surrogate and let it anchor the curve on log-style fits. When the zero-dose mean response is 0, the app treats that zero-dose point as the 0% baseline instead of dividing by zero."),
             tags$p("The app does not assume a fixed unit. You can use nM, uM, ug/mL, mg/mL, or any other unit as long as the concentration column is numeric, then write the exact unit in the x-axis title."),
             tags$p("If you want GraphPad-like absolute normalization, choose 'Normalize using manual 0% and 100% controls' and enter the assay control responses used to define 100% and 0%."),
             tags$p("For the other-plots module, the x column can be categorical or numeric, the y column should be numeric, and the optional annotation column can contain letters or short labels to place above bars, boxes, or line points."),
@@ -4841,7 +5028,8 @@ server <- function(input, output, session) {
         response_transform = input$response_transform,
         control_100 = input$control_100_value %||% NA_real_,
         control_0 = input$control_0_value %||% NA_real_,
-        dose_scale = input$dose_scale %||% dose_scale_linear
+        dose_scale = input$dose_scale %||% dose_scale_linear,
+        include_zero_dose_in_fit = isTRUE(input$include_zero_dose_in_fit)
       )
 
       comparison <- NULL
@@ -4941,7 +5129,14 @@ server <- function(input, output, session) {
     if (isTRUE(input$use_log10_axis) && isTRUE(result$prepared$zero_dose_rows > 0)) {
       note_parts <- c(
         note_parts,
-        "Zero-dose rows stay excluded from fitting. On the log10 x-axis they are hidden, but they can still be used for zero-dose control normalization."
+        if (isTRUE(result$prepared$zero_dose_in_fit)) {
+          sprintf(
+            "Zero-dose rows were included in the fit by replacing concentration 0 with %s. On the log10 x-axis those rows are plotted at that surrogate position because x = 0 cannot be drawn on a log scale.",
+            format_decimal_text(result$prepared$zero_dose_fit_value, 4)
+          )
+        } else {
+          "Zero-dose rows stay excluded from fitting. On the log10 x-axis they are hidden, but they can still be used for zero-dose control normalization."
+        }
       )
     }
     note_parts <- note_parts[nzchar(note_parts)]
