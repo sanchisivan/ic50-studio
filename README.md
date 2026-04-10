@@ -14,11 +14,15 @@ The app was developed at the **Laboratory of Bioactive Peptides (LPB)**, Faculty
 
 - Import `csv`, `tsv`, `txt`, `xls`, and `xlsx` files
 - Map your own dose, response, and optional group columns
+- Accept either linear concentration columns or already `log10`-transformed concentration columns
 - Fit `4PL`, `5PL`, `3PL (Hill fixed = 1)`, `3PL (Bottom = 0)`, and `3PL (Top = 100)`
 - Report either `IC50` or `EC50`
 - Use `Auto-detect`, `Increasing`, or `Decreasing` curve direction
 - Fit either `Group means` or `All observations`
+- Normalize responses with min/max scaling, manual `0%` and `100%` controls, or zero-dose controls per group
 - Compare all supported models before running bootstrap uncertainty
+- Choose automatic, measured-dose, or custom x-axis breaks and show either concentration or `log10(concentration)` axis labels
+- Control curve error-bar cap width independently from the x-value spacing
 - Export curve plots, fit tables, other plots, and other-plot summary tables
 - Build `Bar plot`, `Boxplot`, and `Line plot` figures in the `Other Plots` tab
 - Add manual annotation labels or automatic significance letters to bar plots
@@ -44,13 +48,14 @@ shiny::runApp()
 1. Launch the app.
 2. Click `Use example dataset` or upload your own file.
 3. Map the `Concentration or dose column`, `Response column`, and optional `Group or compound column`.
-4. Start with `Fit curve using = Group means`.
-5. Keep `Potency uncertainty = None` during exploration.
-6. If you are unsure which equation fits best, enable `Compare all models first (no bootstrap)`.
-7. Click `Run analysis`.
-8. Review `Curve Plot`, `Fit Results`, and `Model Comparison`.
-9. Only after the fit looks right, enable bootstrap uncertainty for final reporting.
-10. Use the `Other Plots` tab if you want publication-style assay figures that do not require curve fitting.
+4. Set `Uploaded concentration values` so the app knows whether your file stores linear concentrations or already `log10`-transformed values.
+5. Start with `Fit curve using = Group means`.
+6. Keep `Potency uncertainty = None` during exploration.
+7. If you are unsure which equation fits best, enable `Compare all models first (no bootstrap)`.
+8. Click `Run analysis`.
+9. Review `Curve Plot`, `Fit Results`, and `Model Comparison`.
+10. Only after the fit looks right, enable bootstrap uncertainty for final reporting.
+11. Use the `Other Plots` tab if you want publication-style assay figures that do not require curve fitting.
 
 ## Input data expectations
 
@@ -63,10 +68,13 @@ For dose-response fitting, your file should contain:
 Important behavior:
 
 - Negative doses are removed.
-- Zero-dose rows are kept for preview and linear-axis plotting, but excluded from the actual curve fit.
-- Each fitted group needs at least `4` distinct positive dose values.
+- The app accepts either linear concentrations such as `0.01`, `0.1`, `1`, or `10`, or already `log10`-transformed values such as `-2`, `-1`, `0`, or `1`. Use `Uploaded concentration values` to match your file.
+- Zero-dose rows in linear-concentration files are kept in the preview, excluded from the nonlinear fit, and can be used for `Normalize to zero-dose control (per group)`.
+- Each fitted group needs at least `4` distinct positive dose values after any log10-to-linear conversion.
 - The app does not assume a fixed concentration unit. You can use `nM`, `uM`, `ug/mL`, `mg/mL`, or any other unit as long as the dose column is numeric.
+- `IC50` and `EC50` are always reported in linear concentration units, even when the uploaded concentration column is already log10-transformed.
 - If you choose `Normalize using manual 0% and 100% controls`, the app applies `100 * (Y - control_0) / (control_100 - control_0)`.
+- If you choose `Normalize to zero-dose control (per group)`, the app applies `100 * Y / mean(Y at concentration 0)` within each group.
 
 An example file is included at [example_dose_response.csv](example_dose_response.csv).
 
@@ -78,6 +86,14 @@ An example file is included at [example_dose_response.csv](example_dose_response
 - `Weighting = 1 / SD^2 from means` is only meaningful with `Fit curve using = Group means`.
 - If you switch to `All observations`, the app resets weighting to `None`.
 - `95% CI`, `+/- SD`, and `+/- SEM` are bootstrap-based uncertainty estimates for the fitted potency value.
+
+## Plot controls
+
+- `Use log10 concentration axis` changes the x-axis spacing, not the underlying reported concentration units.
+- `Log10 axis labels` can show either the concentration values or the displayed `log10(concentration)` values.
+- `X-axis breaks` can be `Automatic`, `Measured concentrations`, or `Custom`.
+- In `Custom` mode, x breaks and x limits follow the same scale shown on the axis.
+- `Error bar cap width (% of x-axis span)` controls the visual cap width so it stays consistent across x-axis scales.
 
 ## Choosing a dose-response model
 
