@@ -66,11 +66,11 @@ read_input_data <- function(path, filename, sheet = NULL) {
   ext <- tolower(tools::file_ext(filename))
 
   if (ext %in% c("csv")) {
-    return(utils::read.csv(path, check.names = FALSE, stringsAsFactors = FALSE))
+    return(read_delimited_input(path, filename))
   }
 
   if (ext %in% c("tsv", "txt")) {
-    return(utils::read.delim(path, check.names = FALSE, stringsAsFactors = FALSE))
+    return(read_delimited_input(path, filename))
   }
 
   if (ext %in% c("xls", "xlsx")) {
@@ -86,6 +86,84 @@ available_sheets <- function(path, filename) {
     return(readxl::excel_sheets(path))
   }
   character()
+}
+
+delimiter_label <- function(separator) {
+  switch(
+    separator,
+    "," = "comma (,)",
+    ";" = "semicolon (;)",
+    "\t" = "tab",
+    "|" = "pipe (|)",
+    "unknown"
+  )
+}
+
+detect_delimited_format <- function(path, filename = NULL) {
+  ext <- tolower(tools::file_ext(filename %||% path))
+  raw_lines <- tryCatch(
+    readLines(path, warn = FALSE, n = 6, encoding = "UTF-8"),
+    error = function(e) character()
+  )
+  raw_lines <- gsub("\ufeff", "", raw_lines, fixed = TRUE)
+  sample_lines <- raw_lines[nzchar(trimws(raw_lines))]
+  candidate_separators <- c(",", ";", "\t", "|")
+
+  separator_scores <- vapply(candidate_separators, function(separator) {
+    if (!length(sample_lines)) {
+      return(0)
+    }
+
+    counts <- vapply(
+      sample_lines,
+      function(line) length(strsplit(line, separator, fixed = TRUE)[[1]]),
+      integer(1)
+    )
+    positive_counts <- counts[counts > 1]
+    if (!length(positive_counts)) {
+      return(0)
+    }
+
+    consistency_bonus <- if (length(unique(positive_counts)) == 1) 0.5 else 0
+    mean(positive_counts - 1) + consistency_bonus
+  }, numeric(1))
+
+  default_separator <- if (ext %in% c("tsv", "txt")) "\t" else ","
+  best_separator <- names(which.max(separator_scores))[1] %||% default_separator
+  if (!is.finite(separator_scores[[best_separator]]) || separator_scores[[best_separator]] <= 0) {
+    best_separator <- default_separator
+  }
+
+  sample_text <- paste(sample_lines, collapse = " ")
+  has_decimal_comma <- grepl("(?<!\\d)\\d+,\\d+(?!\\d)", sample_text, perl = TRUE)
+  has_decimal_point <- grepl("(?<!\\d)\\d+\\.\\d+(?!\\d)", sample_text, perl = TRUE)
+  decimal_mark <- if (has_decimal_comma && !has_decimal_point && !identical(best_separator, ",")) "," else "."
+
+  list(
+    separator = best_separator,
+    separator_label = delimiter_label(best_separator),
+    decimal_mark = decimal_mark
+  )
+}
+
+read_delimited_input <- function(path, filename = NULL) {
+  format_info <- detect_delimited_format(path, filename)
+  data <- utils::read.table(
+    path,
+    header = TRUE,
+    sep = format_info$separator,
+    dec = format_info$decimal_mark,
+    check.names = FALSE,
+    stringsAsFactors = FALSE,
+    fill = TRUE,
+    strip.white = TRUE,
+    comment.char = "",
+    quote = "\"'"
+  )
+
+  data <- as.data.frame(data, stringsAsFactors = FALSE)
+  attr(data, "import_format") <- format_info
+  data
 }
 
 guess_column <- function(data, patterns, fallback = NULL) {
@@ -982,6 +1060,852 @@ is_numericish_column <- function(x) {
 
   numeric_values <- suppressWarnings(as.numeric(values))
   all(is.finite(numeric_values))
+}
+
+find_matching_columns <- function(data, patterns) {
+  nm <- names(data)
+  if (!length(nm)) {
+    return(character())
+  }
+
+  lower_nm <- tolower(nm)
+  matches <- integer()
+  for (pattern in patterns) {
+    matches <- c(matches, grep(pattern, lower_nm, value = FALSE))
+  }
+
+  unique(nm[unique(matches)])
+}
+
+guess_preferred_column <- function(data, patterns, prefer_numeric = FALSE, exclude = character(), fallback = NULL, none_value = NULL) {
+  nm <- setdiff(names(data), exclude)
+  if (!length(nm)) {
+    return(list(
+      value = none_value %||% fallback %||% "",
+      matched = FALSE,
+      matches = character(),
+      guessed_by_type = FALSE
+    ))
+  }
+
+  matches <- find_matching_columns(data[nm], patterns)
+  if (length(matches)) {
+    return(list(
+      value = matches[1],
+      matched = TRUE,
+      matches = matches,
+      guessed_by_type = FALSE
+    ))
+  }
+
+  if (prefer_numeric) {
+    numeric_candidates <- nm[vapply(data[nm], is_numericish_column, logical(1))]
+    if (length(numeric_candidates)) {
+      return(list(
+        value = numeric_candidates[1],
+        matched = FALSE,
+        matches = character(),
+        guessed_by_type = TRUE
+      ))
+    }
+  } else {
+    non_numeric_candidates <- nm[!vapply(data[nm], is_numericish_column, logical(1))]
+    if (length(non_numeric_candidates)) {
+      return(list(
+        value = non_numeric_candidates[1],
+        matched = FALSE,
+        matches = character(),
+        guessed_by_type = TRUE
+      ))
+    }
+  }
+
+  list(
+    value = none_value %||% fallback %||% nm[1],
+    matched = FALSE,
+    matches = character(),
+    guessed_by_type = FALSE
+  )
+}
+
+guess_mapping_columns <- function(data) {
+  nm <- names(data)
+  if (!length(nm)) {
+    empty_guess <- list(value = "", matched = FALSE, matches = character(), guessed_by_type = FALSE)
+    return(list(dose = empty_guess, response = empty_guess, group = empty_guess))
+  }
+
+  dose_guess <- guess_preferred_column(
+    data,
+    patterns = c("dose", "conc", "concentration", "log.*conc", "\\bum\\b", "\\bnm\\b"),
+    prefer_numeric = TRUE,
+    fallback = nm[1]
+  )
+
+  response_fallback <- setdiff(nm, dose_guess$value)[1] %||% nm[min(2, length(nm))]
+  response_guess <- guess_preferred_column(
+    data,
+    patterns = c("response", "signal", "viability", "inhibition", "activity", "effect", "readout"),
+    prefer_numeric = TRUE,
+    exclude = dose_guess$value,
+    fallback = response_fallback
+  )
+
+  group_guess <- guess_preferred_column(
+    data,
+    patterns = c("group", "compound", "sample", "treatment", "peptide", "variant", "name", "condition"),
+    prefer_numeric = FALSE,
+    exclude = unique(c(dose_guess$value, response_guess$value)),
+    none_value = "None"
+  )
+
+  list(
+    dose = dose_guess,
+    response = response_guess,
+    group = group_guess
+  )
+}
+
+non_empty_value_count <- function(x) {
+  values <- trimws(as.character(x))
+  sum(!is.na(values) & nzchar(values))
+}
+
+non_numeric_value_count <- function(x) {
+  if (is.numeric(x)) {
+    return(sum(!is.finite(x), na.rm = TRUE))
+  }
+
+  values <- trimws(as.character(x))
+  keep <- !is.na(values) & nzchar(values)
+  if (!any(keep)) {
+    return(0L)
+  }
+
+  numeric_values <- suppressWarnings(as.numeric(values[keep]))
+  sum(!is.finite(numeric_values))
+}
+
+preview_example_values <- function(x, max_values = 3) {
+  values <- trimws(as.character(x))
+  values <- values[!is.na(values) & nzchar(values)]
+  if (!length(values)) {
+    return("NA")
+  }
+
+  values <- unique(values)
+  if (length(values) > max_values) {
+    values <- c(values[seq_len(max_values)], "...")
+  }
+
+  paste(values, collapse = ", ")
+}
+
+normalize_import_status <- function(status) {
+  status <- tolower(trimws(status %||% ""))
+
+  if (!nzchar(status)) {
+    return("ok")
+  }
+
+  if (status %in% c("ok", "warn", "problem")) {
+    return(status)
+  }
+
+  if (identical(status, "check")) {
+    return("warn")
+  }
+
+  status
+}
+
+combine_import_status <- function(...) {
+  status_values <- unlist(list(...), use.names = FALSE)
+  status_values <- vapply(status_values, normalize_import_status, character(1))
+  status_values <- status_values[nzchar(status_values)]
+
+  if (!length(status_values)) {
+    return("ok")
+  }
+
+  if ("problem" %in% status_values) {
+    return("problem")
+  }
+  if ("warn" %in% status_values) {
+    return("warn")
+  }
+
+  "ok"
+}
+
+import_status_label <- function(status) {
+  status <- normalize_import_status(status)
+
+  switch(
+    status,
+    ok = "OK",
+    warn = "Warn",
+    problem = "Issue",
+    "Warn"
+  )
+}
+
+split_import_roles <- function(role_text) {
+  role_text <- trimws(role_text %||% "")
+  if (!nzchar(role_text)) {
+    return(character())
+  }
+
+  roles <- unlist(strsplit(role_text, "\\s*\\+\\s*"))
+  roles[nzchar(roles)]
+}
+
+import_role_table_class <- function(role_text) {
+  roles <- split_import_roles(role_text)
+  class_names <- character()
+
+  if ("Dose" %in% roles) {
+    class_names <- c(class_names, "import-role-dose")
+  }
+  if ("Response" %in% roles) {
+    class_names <- c(class_names, "import-role-response")
+  }
+  if ("Group" %in% roles) {
+    class_names <- c(class_names, "import-role-group")
+  }
+
+  paste(class_names, collapse = " ")
+}
+
+import_status_table_class <- function(status) {
+  status <- normalize_import_status(status)
+
+  switch(
+    status,
+    ok = "import-status-ok",
+    warn = "import-status-warn",
+    problem = "import-status-problem",
+    "import-status-warn"
+  )
+}
+
+import_status_pill <- function(status) {
+  normalized_status <- normalize_import_status(status)
+  tags$span(
+    class = paste("import-pill", switch(
+      normalized_status,
+      ok = "import-pill-ok",
+      warn = "import-pill-warn",
+      problem = "import-pill-problem",
+      "import-pill-warn"
+    )),
+    import_status_label(normalized_status)
+  )
+}
+
+import_role_pills <- function(role_text) {
+  roles <- split_import_roles(role_text)
+  if (!length(roles)) {
+    return(tags$span(class = "import-note-muted", "-"))
+  }
+
+  tagList(lapply(roles, function(role) {
+    tags$span(
+      class = paste(
+        "import-pill",
+        switch(
+          role,
+          Dose = "import-pill-dose",
+          Response = "import-pill-response",
+          Group = "import-pill-group",
+          "import-pill-neutral"
+        )
+      ),
+      role
+    )
+  }))
+}
+
+import_mapping_summary_ui <- function(mapping) {
+  if (is.null(mapping)) {
+    return(tags$span(class = "import-note-muted", "No mapping available"))
+  }
+
+  tagList(
+    tags$div(
+      class = "import-mapping-row",
+      tags$span(class = "import-mapping-label", "Dose/concentration"),
+      import_role_pills("Dose"),
+      tags$code(mapping$dose$value %||% "")
+    ),
+    tags$div(
+      class = "import-mapping-row",
+      tags$span(class = "import-mapping-label", "Response"),
+      import_role_pills("Response"),
+      tags$code(mapping$response$value %||% "")
+    ),
+    tags$div(
+      class = "import-mapping-row",
+      tags$span(class = "import-mapping-label", "Group/compound"),
+      import_role_pills("Group"),
+      tags$code(mapping$group$value %||% "")
+    )
+  )
+}
+
+import_column_header_class <- function(role_text, status) {
+  role_class <- import_role_table_class(role_text)
+  status_class <- switch(
+    normalize_import_status(status),
+    warn = "import-header-warn",
+    problem = "import-header-problem",
+    ""
+  )
+
+  paste(c(role_class, status_class), collapse = " ")
+}
+
+import_column_cell_class <- function(status) {
+  switch(
+    normalize_import_status(status),
+    warn = "import-cell-warn",
+    problem = "import-cell-problem",
+    ""
+  )
+}
+
+summarize_import_columns <- function(data, mapping = NULL, single_column_separator_issue = FALSE) {
+  if (!ncol(data)) {
+    return(data.frame(
+      column = character(),
+      role = character(),
+      status = character(),
+      type = character(),
+      non_empty = integer(),
+      invalid_numeric = character(),
+      numeric_like = character(),
+      notes = character(),
+      preview = character(),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  nm <- names(data)
+  trimmed_names <- trimws(nm)
+  normalized_names <- tolower(trimmed_names)
+  duplicated_exact <- duplicated(nm) | duplicated(nm, fromLast = TRUE)
+  duplicated_normalized <- duplicated(normalized_names) | duplicated(normalized_names, fromLast = TRUE)
+
+  mapping_roles <- vector("list", length(nm))
+  if (!is.null(mapping)) {
+    if ((mapping$dose$value %||% "") %in% nm) {
+      mapping_roles[[match(mapping$dose$value, nm)]] <- c(mapping_roles[[match(mapping$dose$value, nm)]], "Dose")
+    }
+    if ((mapping$response$value %||% "") %in% nm) {
+      mapping_roles[[match(mapping$response$value, nm)]] <- c(mapping_roles[[match(mapping$response$value, nm)]], "Response")
+    }
+    if (!identical(mapping$group$value %||% "None", "None") && (mapping$group$value %||% "") %in% nm) {
+      mapping_roles[[match(mapping$group$value, nm)]] <- c(mapping_roles[[match(mapping$group$value, nm)]], "Group")
+    }
+  }
+
+  summary_list <- lapply(seq_along(nm), function(i) {
+    column_name <- nm[i]
+    column_values <- data[[i]]
+    roles <- unique(mapping_roles[[i]])
+    notes <- character()
+    status <- "ok"
+    non_empty <- non_empty_value_count(column_values)
+    non_numeric <- non_numeric_value_count(column_values)
+    numeric_like <- is_numericish_column(column_values)
+    invalid_numeric_display <- if (numeric_like || any(c("Dose", "Response") %in% roles)) {
+      as.character(non_numeric)
+    } else {
+      "\u2014"
+    }
+
+    if (!nzchar(trimmed_names[i])) {
+      notes <- c(notes, "Blank column name.")
+      status <- combine_import_status(status, "problem")
+    }
+    if (!identical(column_name, trimmed_names[i])) {
+      notes <- c(notes, "Header has leading or trailing spaces.")
+      status <- combine_import_status(status, "warn")
+    }
+    if (duplicated_exact[i]) {
+      notes <- c(notes, "Exact duplicate header name.")
+      status <- combine_import_status(status, "problem")
+    }
+    if (duplicated_normalized[i] && !duplicated_exact[i]) {
+      notes <- c(notes, "Header differs from another one only by spaces or letter case.")
+      status <- combine_import_status(status, "warn")
+    }
+    if (grepl("^\\.\\.\\.[0-9]+$", column_name)) {
+      notes <- c(notes, "Auto-generated header; the source file likely had a blank name here.")
+      status <- combine_import_status(status, "warn")
+    }
+    if (non_empty == 0) {
+      notes <- c(notes, "Column is empty.")
+      status <- combine_import_status(status, "warn")
+    }
+    if (isTRUE(single_column_separator_issue) && i == 1) {
+      notes <- c(notes, "File may have landed in one column because the separator was not recognized.")
+      status <- combine_import_status(status, "problem")
+    }
+
+    if (length(roles) > 1 && all(c("Dose", "Response") %in% roles)) {
+      notes <- c(notes, "Currently mapped to both dose and response.")
+      status <- combine_import_status(status, "problem")
+    }
+
+    if ("Dose" %in% roles) {
+      if (!numeric_like) {
+        notes <- c(notes, "Dose mapping points to a column that is not fully numeric.")
+        status <- combine_import_status(status, "problem")
+      }
+      if (non_numeric > 0) {
+        notes <- c(notes, sprintf("%s non-numeric dose value(s) would be dropped.", non_numeric))
+        status <- combine_import_status(status, "problem")
+      }
+      if (!isTRUE(mapping$dose$matched)) {
+        notes <- c(notes, "Guessed as dose; header not recognized.")
+        status <- combine_import_status(status, "warn")
+      }
+    }
+
+    if ("Response" %in% roles) {
+      if (!numeric_like) {
+        notes <- c(notes, "Response mapping points to a column that is not fully numeric.")
+        status <- combine_import_status(status, "problem")
+      }
+      if (non_numeric > 0) {
+        notes <- c(notes, sprintf("%s non-numeric response value(s) would be dropped.", non_numeric))
+        status <- combine_import_status(status, "problem")
+      }
+      if (!isTRUE(mapping$response$matched)) {
+        notes <- c(notes, "Guessed as response; header not recognized.")
+        status <- combine_import_status(status, "warn")
+      }
+    }
+
+    if ("Group" %in% roles) {
+      if (!isTRUE(mapping$group$matched)) {
+        notes <- c(notes, "Guessed as group; header not recognized.")
+        status <- combine_import_status(status, "warn")
+      }
+      if (numeric_like) {
+        notes <- c(notes, "Group column looks numeric; confirm that this is really the series identifier.")
+        status <- combine_import_status(status, "warn")
+      }
+    }
+
+    data.frame(
+      column = column_name,
+      role = paste(roles, collapse = " + "),
+      status = import_status_label(status),
+      type = class(column_values)[1],
+      non_empty = non_empty,
+      invalid_numeric = invalid_numeric_display,
+      numeric_like = ifelse(numeric_like, "Yes", "No"),
+      notes = paste(unique(notes), collapse = "; "),
+      preview = preview_example_values(column_values),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  do.call(rbind, summary_list)
+}
+
+build_import_preview_info <- function(data = NULL, source_label = NULL, filename = NULL, sheet = NULL, parse_info = NULL, source_token = NULL, error = NULL) {
+  source_label <- source_label %||% filename %||% "Imported data"
+  ext <- tolower(tools::file_ext(filename %||% ""))
+  signature <- paste(source_label, source_token %||% filename %||% "", sheet %||% "", sep = "|")
+
+  if (is.null(data)) {
+    guidance <- c(
+      if (ext %in% c("csv", "tsv", "txt")) "Check whether the file separator and header row are correct.",
+      "Review the variable names so dose/concentration and response are stored in separate columns."
+    )
+    guidance <- unique(guidance[nzchar(guidance)])
+
+    return(list(
+      data = NULL,
+      source_label = source_label,
+      filename = filename,
+      sheet = sheet,
+      metadata = list(
+        rows = 0L,
+        columns = 0L,
+        separator_label = parse_info$separator_label %||% NA_character_,
+        decimal_mark = parse_info$decimal_mark %||% NA_character_
+      ),
+      mapping = NULL,
+      issues = unique(c(error)),
+      suggestions = guidance,
+      preview_rows = data.frame(),
+      column_summary = data.frame(),
+      preview_header_classes = character(),
+      preview_column_classes = character(),
+      severity_counts = c(problem = 0L, warn = 0L, ok = 0L),
+      error = error,
+      status = "problem",
+      signature = signature
+    ))
+  }
+
+  nm <- names(data)
+  trimmed_names <- trimws(nm)
+  normalized_names <- tolower(trimmed_names)
+  mapping <- guess_mapping_columns(data)
+  numeric_cols <- nm[vapply(data, is_numericish_column, logical(1))]
+  issues <- character()
+  suggestions <- character()
+
+  if (!ncol(data)) {
+    issues <- c(issues, "The file was read with zero columns.")
+  }
+  if (any(!nzchar(trimmed_names))) {
+    issues <- c(issues, "At least one column name is blank.")
+  }
+  if (any(nm != trimmed_names)) {
+    suggestions <- c(suggestions, "Some column names include leading or trailing spaces.")
+  }
+  if (any(duplicated(nm))) {
+    duplicated_names <- unique(nm[duplicated(nm)])
+    issues <- c(
+      issues,
+      sprintf("Duplicate column names detected: %s.", paste(duplicated_names, collapse = ", "))
+    )
+  }
+  case_trim_duplicates <- unique(trimmed_names[duplicated(normalized_names) & nzchar(trimmed_names)])
+  if (length(case_trim_duplicates)) {
+    suggestions <- c(
+      suggestions,
+      sprintf("Some headers differ only by spaces or letter case: %s.", paste(case_trim_duplicates, collapse = ", "))
+    )
+  }
+
+  placeholder_names <- nm[grepl("^\\.\\.\\.[0-9]+$", nm)]
+  if (length(placeholder_names)) {
+    suggestions <- c(
+      suggestions,
+      "Some headers look auto-generated, which often means one or more column names were blank in the source file."
+    )
+  }
+
+  if (!length(numeric_cols)) {
+    issues <- c(issues, "No numeric-looking columns were detected.")
+  }
+
+  if (ncol(data) == 1) {
+    first_values <- paste(head(as.character(data[[1]]), 3), collapse = " ")
+    if (grepl(";", first_values, fixed = TRUE) ||
+        grepl("\t", first_values, fixed = TRUE) ||
+        grepl("|", first_values, fixed = TRUE)) {
+      issues <- c(
+        issues,
+        "The file was read as a single column; this often means the separator was not recognized."
+      )
+    }
+  }
+
+  if (length(nm) && mean(vapply(trimmed_names, is_numericish_column, logical(1))) >= 0.5) {
+    suggestions <- c(
+      suggestions,
+      "Several column names look like data values. The file may be missing a header row."
+    )
+  }
+
+  if (identical(mapping$dose$value, mapping$response$value)) {
+    issues <- c(
+      issues,
+      "Dose/concentration and response currently point to the same column. Review the column mapping."
+    )
+  }
+
+  if (!isTRUE(mapping$dose$matched)) {
+    suggestions <- c(
+      suggestions,
+      sprintf("Dose/concentration was not identified by name; the app guessed '%s'.", mapping$dose$value)
+    )
+  }
+  if (!isTRUE(mapping$response$matched)) {
+    suggestions <- c(
+      suggestions,
+      sprintf("Response was not identified by name; the app guessed '%s'.", mapping$response$value)
+    )
+  }
+  if (!identical(mapping$group$value, "None") && !isTRUE(mapping$group$matched)) {
+    suggestions <- c(
+      suggestions,
+      sprintf("Group/compound was not identified by name; the app guessed '%s'.", mapping$group$value)
+    )
+  }
+  if (identical(mapping$group$value, "None") && any(!vapply(data, is_numericish_column, logical(1)))) {
+    suggestions <- c(
+      suggestions,
+      "A clear group/compound column was not detected. Review the Group mapping if you expect multiple series."
+    )
+  }
+
+  if (mapping$dose$value %in% nm) {
+    dose_non_numeric <- non_numeric_value_count(data[[mapping$dose$value]])
+    if (!is_numericish_column(data[[mapping$dose$value]])) {
+      issues <- c(
+        issues,
+        sprintf("Dose/concentration column '%s' does not look fully numeric.", mapping$dose$value)
+      )
+    }
+    if (dose_non_numeric > 0) {
+      issues <- c(
+        issues,
+        sprintf("Dose/concentration column '%s' has %s non-numeric value(s) that would be dropped during analysis.", mapping$dose$value, dose_non_numeric)
+      )
+    }
+  }
+
+  if (mapping$response$value %in% nm) {
+    response_non_numeric <- non_numeric_value_count(data[[mapping$response$value]])
+    if (!is_numericish_column(data[[mapping$response$value]])) {
+      issues <- c(
+        issues,
+        sprintf("Response column '%s' does not look fully numeric.", mapping$response$value)
+      )
+    }
+    if (response_non_numeric > 0) {
+      issues <- c(
+        issues,
+        sprintf("Response column '%s' has %s non-numeric value(s) that would be dropped during analysis.", mapping$response$value, response_non_numeric)
+      )
+    }
+  }
+
+  single_column_separator_issue <- any(grepl(
+    "single column|separator was not recognized",
+    issues,
+    ignore.case = TRUE
+  ))
+  column_summary <- summarize_import_columns(
+    data,
+    mapping = mapping,
+    single_column_separator_issue = single_column_separator_issue
+  )
+  if (!nrow(column_summary)) {
+    severity_counts <- c(problem = 0L, warn = 0L, ok = 0L)
+  } else {
+    severity_counts <- c(
+      problem = sum(vapply(column_summary$status, function(value) identical(normalize_import_status(value), "problem"), logical(1))),
+      warn = sum(vapply(column_summary$status, function(value) identical(normalize_import_status(value), "warn"), logical(1))),
+      ok = sum(vapply(column_summary$status, function(value) identical(normalize_import_status(value), "ok"), logical(1)))
+    )
+  }
+
+  preview_header_classes <- if (!nrow(column_summary)) {
+    character()
+  } else {
+    setNames(
+      vapply(seq_len(nrow(column_summary)), function(i) {
+        import_column_header_class(
+          role_text = column_summary$role[i],
+          status = column_summary$status[i]
+        )
+      }, character(1)),
+      column_summary$column
+    )
+  }
+
+  preview_column_classes <- if (!nrow(column_summary)) {
+    character()
+  } else {
+    setNames(
+      vapply(seq_len(nrow(column_summary)), function(i) {
+        import_column_cell_class(column_summary$status[i])
+      }, character(1)),
+      column_summary$column
+    )
+  }
+
+  status <- if (length(issues) || isTRUE(severity_counts[["problem"]] > 0)) {
+    "problem"
+  } else if (length(suggestions) || isTRUE(severity_counts[["warn"]] > 0)) {
+    "warn"
+  } else {
+    "ok"
+  }
+
+  list(
+    data = data,
+    source_label = source_label,
+    filename = filename,
+    sheet = sheet,
+    metadata = list(
+      rows = nrow(data),
+      columns = ncol(data),
+      separator_label = parse_info$separator_label %||% NA_character_,
+      decimal_mark = parse_info$decimal_mark %||% NA_character_
+    ),
+    mapping = mapping,
+    issues = unique(issues[nzchar(issues)]),
+    suggestions = unique(suggestions[nzchar(suggestions)]),
+    preview_rows = utils::head(data, 8),
+    column_summary = column_summary,
+    preview_header_classes = preview_header_classes,
+    preview_column_classes = preview_column_classes,
+    severity_counts = severity_counts,
+    error = NULL,
+    status = status,
+    signature = signature
+  )
+}
+
+overall_import_status <- function(info) {
+  if (!is.null(info$error)) {
+    return("problem")
+  }
+
+  if (isTRUE(info$severity_counts[["problem"]] > 0) || length(info$issues) > 0) {
+    return("problem")
+  }
+
+  if (isTRUE(info$severity_counts[["warn"]] > 0) || length(info$suggestions) > 0) {
+    return("warn")
+  }
+
+  "ok"
+}
+
+import_status_box_class <- function(status) {
+  switch(
+    normalize_import_status(status),
+    ok = "import-tip-ok",
+    warn = "import-tip-warn",
+    problem = "import-tip-problem",
+    "import-tip-warn"
+  )
+}
+
+format_preview_text <- function(value, max_chars = 72) {
+  if (length(value) == 0 || is.na(value)) {
+    return("NA")
+  }
+
+  text <- gsub("[\r\n\t]+", " ", as.character(value))
+  text <- gsub("\\s{2,}", " ", text)
+  text <- trimws(text)
+  if (!nzchar(text)) {
+    return("")
+  }
+  if (nchar(text) > max_chars) {
+    return(paste0(substr(text, 1, max_chars - 3), "..."))
+  }
+
+  text
+}
+
+html_data_frame_table <- function(df, max_rows = NULL, row_class = NULL, header_classes = NULL, header_labels = NULL, column_classes = NULL, col_renderers = NULL, table_class = "table table-striped table-bordered import-table") {
+  if (!ncol(df) || !nrow(df)) {
+    return(tags$p("No rows to display."))
+  }
+
+  row_limit <- max_rows %||% nrow(df)
+  df <- utils::head(df, row_limit)
+
+  tags$table(
+    class = table_class,
+    tags$thead(
+      tags$tr(lapply(names(df), function(column_name) {
+        tags$th(
+          class = paste(
+            c(
+              header_classes[[column_name]] %||% NULL,
+              column_classes[[column_name]] %||% NULL
+            ),
+            collapse = " "
+          ),
+          format_preview_text(header_labels[[column_name]] %||% column_name, max_chars = 120)
+        )
+      }))
+    ),
+    tags$tbody(
+      lapply(seq_len(nrow(df)), function(i) {
+        row_values <- df[i, , drop = FALSE]
+        tags$tr(
+          class = if (is.null(row_class)) NULL else row_class(row_values, i),
+          lapply(names(row_values), function(column_name) {
+            cell_value <- row_values[[column_name]][1]
+            rendered_value <- if (!is.null(col_renderers) && column_name %in% names(col_renderers)) {
+              col_renderers[[column_name]](cell_value, row_values, i)
+            } else {
+              format_preview_text(cell_value)
+            }
+
+            tags$td(
+              class = column_classes[[column_name]] %||% NULL,
+              rendered_value
+            )
+          })
+        )
+      })
+    )
+  )
+}
+
+import_column_profile_table <- function(info, max_rows = 20) {
+  html_data_frame_table(
+    info$column_summary,
+    max_rows = max_rows,
+    header_labels = c(
+      column = "column",
+      role = "role",
+      status = "status",
+      type = "type",
+      non_empty = "filled",
+      invalid_numeric = "bad num",
+      numeric_like = "numeric?",
+      notes = "notes",
+      preview = "sample"
+    ),
+    row_class = function(row, i) {
+      switch(
+        normalize_import_status(row$status[1]),
+        warn = "import-row-warn",
+        problem = "import-row-problem",
+        NULL
+      )
+    },
+    column_classes = c(
+      column = "import-col-column",
+      role = "import-col-role",
+      status = "import-col-status",
+      type = "import-col-type",
+      non_empty = "import-col-filled",
+      invalid_numeric = "import-col-invalid",
+      numeric_like = "import-col-numeric",
+      notes = "import-col-notes",
+      preview = "import-col-preview"
+    ),
+    col_renderers = list(
+      role = function(value, row, i) import_role_pills(value),
+      status = function(value, row, i) import_status_pill(value),
+      notes = function(value, row, i) {
+        if (!nzchar(trimws(value))) {
+          return(tags$span(class = "import-note-muted", "\u2014"))
+        }
+        format_preview_text(value, max_chars = 160)
+      }
+    ),
+    table_class = "table table-striped table-bordered import-table import-table-profile"
+  )
+}
+
+import_preview_data_table <- function(info, max_rows = 8) {
+  html_data_frame_table(
+    info$preview_rows,
+    max_rows = max_rows,
+    header_classes = info$preview_header_classes,
+    column_classes = info$preview_column_classes,
+    table_class = "table table-striped table-bordered import-table import-table-preview"
+  )
 }
 
 ordered_levels_from_values <- function(x) {
@@ -2553,6 +3477,101 @@ plotmath_examples_modal <- function() {
     ),
     tags$p("The last example is useful when one title needs normal words, a subscript, the Greek mu symbol, a centered dot, and a superscript in the same expression."),
     tags$p("These examples work for main plot axis titles, legend titles, and the Other Plots axis titles.")
+  )
+}
+
+import_preview_modal <- function(info) {
+  overall_status <- overall_import_status(info)
+  summary_bits <- c(
+    sprintf("Rows: %s", info$metadata$rows %||% 0),
+    sprintf("Columns: %s", info$metadata$columns %||% 0),
+    if (!is.na(info$metadata$separator_label %||% NA_character_)) sprintf("Separator: %s", info$metadata$separator_label),
+    if (!is.na(info$metadata$decimal_mark %||% NA_character_)) sprintf("Decimal mark: %s", info$metadata$decimal_mark),
+    if (nzchar(info$sheet %||% "")) sprintf("Sheet: %s", info$sheet)
+  )
+  summary_bits <- summary_bits[nzchar(summary_bits)]
+
+  modalDialog(
+    title = "Import preview",
+    easyClose = TRUE,
+    size = "l",
+    footer = modalButton("Close"),
+    tags$div(
+      class = "import-preview-shell",
+      tags$div(
+        class = paste("import-preview-card", import_status_box_class(overall_status)),
+        tags$div(
+          class = "import-preview-card-title",
+          tags$strong("Source: "),
+          info$source_label
+        ),
+        tags$div(
+          class = "import-preview-meta",
+          import_status_pill(overall_status),
+          if (length(summary_bits)) tags$span(paste(summary_bits, collapse = " | "))
+        )
+      ),
+      if (!is.null(info$error)) {
+        tagList(
+          tags$div(
+            class = paste("import-preview-card", import_status_box_class("problem")),
+            tags$div(class = "import-preview-card-title", "Import error"),
+            tags$div(info$error)
+          ),
+          if (length(info$suggestions)) {
+            tags$div(
+              class = "import-preview-card",
+              tags$div(class = "import-preview-card-title", "What to check"),
+              tags$ul(
+                class = "import-preview-list",
+                lapply(info$suggestions, tags$li)
+              )
+            )
+          }
+        )
+      } else {
+        tagList(
+          tags$div(
+            class = "import-preview-section",
+            tags$div(class = "import-preview-title", "Suggested column mapping"),
+            tags$div(
+              class = "import-preview-card",
+              import_mapping_summary_ui(info$mapping)
+            )
+          ),
+          if (length(info$issues)) {
+            tags$div(
+              class = paste("import-preview-card", import_status_box_class("problem")),
+              tags$div(class = "import-preview-card-title", "Potential read issues"),
+              tags$ul(
+                class = "import-preview-list",
+                lapply(info$issues, tags$li)
+              )
+            )
+          },
+          if (length(info$suggestions)) {
+            tags$div(
+              class = paste("import-preview-card", import_status_box_class("warn")),
+              tags$div(class = "import-preview-card-title", "Checks to review"),
+              tags$ul(
+                class = "import-preview-list",
+                lapply(info$suggestions, tags$li)
+              )
+            )
+          },
+          tags$div(
+            class = "import-preview-section",
+            tags$div(class = "import-preview-title", "Variable names and column profile"),
+            import_column_profile_table(info, max_rows = 20)
+          ),
+          tags$div(
+            class = "import-preview-section",
+            tags$div(class = "import-preview-title", "First rows as read"),
+            import_preview_data_table(info, max_rows = 8)
+          )
+        )
+      }
+    )
   )
 }
 
@@ -4189,6 +5208,235 @@ ui <- fluidPage(
         padding: 10px 12px;
         margin-top: 8px;
       }
+      .import-preview-shell {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        padding-top: 4px;
+      }
+      .import-preview-section {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .import-preview-title {
+        margin: 0;
+        color: #102a43;
+        font-size: 15px;
+        font-weight: 700;
+        line-height: 1.35;
+      }
+      .import-preview-card {
+        background: #fff9ef;
+        border-radius: 12px;
+        border: 1px solid #eadfca;
+        padding: 12px 14px;
+        margin: 0;
+      }
+      .import-preview-card.import-tip-ok {
+        background: #eefbf3;
+        border-color: #b7e4c7;
+      }
+      .import-preview-card.import-tip-warn {
+        background: #fff8e8;
+        border-color: #f3c987;
+      }
+      .import-preview-card.import-tip-problem {
+        background: #fff1f2;
+        border-color: #fecdd3;
+      }
+      .import-preview-card-title {
+        color: #102a43;
+        font-weight: 700;
+        margin-bottom: 8px;
+      }
+      .import-preview-meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 12px;
+        color: #3e4c59;
+        line-height: 1.45;
+      }
+      .import-preview-meta .import-pill {
+        margin-right: 0;
+        margin-bottom: 0;
+      }
+      .import-preview-list {
+        padding-left: 18px;
+        margin: 0;
+      }
+      .import-preview-list li {
+        margin-bottom: 6px;
+      }
+      .import-preview-list li:last-child {
+        margin-bottom: 0;
+      }
+      .analysis-summary-tip.import-tip-ok {
+        background: #eefbf3;
+        border-color: #b7e4c7;
+      }
+      .analysis-summary-tip.import-tip-warn {
+        background: #fff8e8;
+        border-color: #f3c987;
+      }
+      .analysis-summary-tip.import-tip-problem {
+        background: #fff1f2;
+        border-color: #fecdd3;
+      }
+      .import-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 3px 9px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 1.2;
+        margin-right: 6px;
+        margin-bottom: 4px;
+        white-space: nowrap;
+      }
+      .import-pill-ok {
+        background: #dcfce7;
+        color: #166534;
+      }
+      .import-pill-warn {
+        background: #fef3c7;
+        color: #92400e;
+      }
+      .import-pill-problem {
+        background: #fee2e2;
+        color: #991b1b;
+      }
+      .import-pill-dose {
+        background: #dbeafe;
+        color: #1d4ed8;
+      }
+      .import-pill-response {
+        background: #ccfbf1;
+        color: #0f766e;
+      }
+      .import-pill-group {
+        background: #f8efe2;
+        color: #8b5e34;
+      }
+      .import-pill-neutral {
+        background: #e5e7eb;
+        color: #374151;
+      }
+      .import-note-muted {
+        color: #7b8794;
+        font-style: italic;
+      }
+      .import-mapping-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .import-mapping-row:last-child {
+        margin-bottom: 0;
+      }
+      .import-mapping-label {
+        min-width: 138px;
+        font-weight: 700;
+        color: #102a43;
+      }
+      .import-table th,
+      .import-table td {
+        vertical-align: top !important;
+      }
+      .import-table-profile {
+        width: 100%;
+        table-layout: fixed;
+      }
+      .import-table-profile th,
+      .import-table-profile td {
+        font-size: 12px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .import-table-preview {
+        width: 100%;
+        table-layout: fixed;
+      }
+      .import-table-preview th,
+      .import-table-preview td {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .import-table th {
+        background: #fbf8f2;
+        color: #102a43;
+        border-bottom: 1px solid #d8c8ad !important;
+      }
+      .import-col-column {
+        width: 14%;
+      }
+      .import-col-role {
+        width: 11%;
+      }
+      .import-col-status {
+        width: 9%;
+      }
+      .import-col-type {
+        width: 10%;
+      }
+      .import-col-filled {
+        width: 8%;
+      }
+      .import-col-invalid {
+        width: 10%;
+      }
+      .import-col-numeric {
+        width: 10%;
+      }
+      .import-col-notes {
+        width: 11%;
+      }
+      .import-col-preview {
+        width: 17%;
+      }
+      .import-row-warn td {
+        background: #fff8e8 !important;
+      }
+      .import-row-problem td {
+        background: #fff1f2 !important;
+      }
+      .import-cell-warn {
+        background: #fffdf5;
+      }
+      .import-cell-problem {
+        background: #fff7f7;
+      }
+      .import-header-warn {
+        border-bottom: 3px solid #d97706 !important;
+      }
+      .import-header-problem {
+        border-bottom: 3px solid #dc2626 !important;
+      }
+      .import-table th.import-role-dose {
+        background: #eff6ff;
+        box-shadow: inset 0 -1px 0 #bfdbfe;
+      }
+      .import-table th.import-role-response {
+        background: #f0fdfa;
+        box-shadow: inset 0 -1px 0 #99f6e4;
+      }
+      .import-table th.import-role-group {
+        background: #fffaf3;
+        box-shadow: inset 0 -1px 0 #eadfca;
+      }
+      .import-status-warn {
+        background: #fffaf0;
+      }
+      .import-status-problem {
+        background: #fff5f5;
+      }
       .well {
         background: #fffdfa;
         border: 1px solid #eadfca;
@@ -4327,7 +5575,10 @@ ui <- fluidPage(
           actionButton("load_example", "Use example dataset", class = "secondary-action"),
           br(), br(),
           uiOutput("sheet_ui"),
-          uiOutput("mapping_ui")
+          uiOutput("mapping_ui"),
+          br(),
+          actionButton("show_import_preview", "Open import preview", class = "secondary-action"),
+          helpText("A preview window opens automatically after each upload or Excel-sheet change.")
         ),
         tags$details(
           class = "well",
@@ -4645,6 +5896,8 @@ ui <- fluidPage(
           tabPanel(
             "Data Preview",
             br(),
+            uiOutput("import_summary_ui"),
+            br(),
             h4("Imported data"),
             DTOutput("raw_data_table"),
             br(),
@@ -4790,6 +6043,7 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
   source_mode <- reactiveVal("example")
+  last_import_preview_signature <- reactiveVal(NULL)
 
   observeEvent(input$data_file, {
     source_mode("file")
@@ -4830,25 +6084,96 @@ server <- function(input, output, session) {
     }
   })
 
-  current_data <- reactive({
-    if (identical(source_mode(), "example")) {
-      return(sample_dataset())
-    }
-
-    req(input$data_file)
-    read_input_data(
-      path = input$data_file$datapath,
-      filename = input$data_file$name,
-      sheet = input$sheet_name %||% NULL
-    )
-  })
-
   current_sheets <- reactive({
     if (!identical(source_mode(), "file") || is.null(input$data_file)) {
       return(character())
     }
 
-    available_sheets(input$data_file$datapath, input$data_file$name)
+    tryCatch(
+      available_sheets(input$data_file$datapath, input$data_file$name),
+      error = function(e) character()
+    )
+  })
+
+  selected_sheet_for_import <- reactive({
+    sheets <- current_sheets()
+    if (!length(sheets)) {
+      return(NULL)
+    }
+
+    selected_sheet <- input$sheet_name %||% sheets[1]
+    if (!selected_sheet %in% sheets) {
+      selected_sheet <- sheets[1]
+    }
+
+    selected_sheet
+  })
+
+  current_source_token <- reactive({
+    if (identical(source_mode(), "example")) {
+      return(sprintf("example-%s", input$load_example %||% 0))
+    }
+
+    req(input$data_file)
+    paste(
+      input$data_file$datapath,
+      selected_sheet_for_import() %||% "",
+      sep = "|"
+    )
+  })
+
+  current_import_info <- reactive({
+    if (identical(source_mode(), "example")) {
+      return(build_import_preview_info(
+        data = sample_dataset(),
+        source_label = "Example dataset",
+        source_token = current_source_token()
+      ))
+    }
+
+    req(input$data_file)
+    filename <- input$data_file$name
+    path <- input$data_file$datapath
+    sheet_name <- selected_sheet_for_import()
+    import_result <- tryCatch(
+      {
+        data <- read_input_data(
+          path = path,
+          filename = filename,
+          sheet = sheet_name
+        )
+        list(data = data, error = NULL)
+      },
+      error = function(e) {
+        list(data = NULL, error = conditionMessage(e))
+      }
+    )
+
+    parse_info <- attr(import_result$data, "import_format") %||% (
+      if (tolower(tools::file_ext(filename)) %in% c("csv", "tsv", "txt")) {
+        detect_delimited_format(path, filename)
+      } else {
+        NULL
+      }
+    )
+
+    build_import_preview_info(
+      data = import_result$data,
+      source_label = filename,
+      filename = filename,
+      sheet = sheet_name,
+      parse_info = parse_info,
+      source_token = current_source_token(),
+      error = import_result$error
+    )
+  })
+
+  current_data <- reactive({
+    info <- current_import_info()
+    validate(
+      need(is.null(info$error), info$error %||% "Unable to read the imported data.")
+    )
+    info$data
   })
 
   output$sheet_ui <- renderUI({
@@ -4864,13 +6189,22 @@ server <- function(input, output, session) {
     df <- current_data()
     nm <- names(df)
     req(length(nm) > 0)
+    mapping_guess <- guess_mapping_columns(df)
     selected_dose_col <- isolate(input$dose_col)
     if (is.null(selected_dose_col) || !selected_dose_col %in% nm) {
-      selected_dose_col <- guess_column(df, c("dose", "conc", "concentration", "um", "nm"), nm[1])
+      selected_dose_col <- mapping_guess$dose$value
     }
     selected_dose_scale <- isolate(input$dose_scale)
     if (is.null(selected_dose_scale) || !selected_dose_scale %in% c(dose_scale_linear, dose_scale_log10)) {
       selected_dose_scale <- guess_dose_scale(df, selected_dose_col)
+    }
+    selected_response_col <- isolate(input$response_col)
+    if (is.null(selected_response_col) || !selected_response_col %in% nm) {
+      selected_response_col <- mapping_guess$response$value
+    }
+    selected_group_col <- isolate(input$group_col)
+    if (is.null(selected_group_col) || (!identical(selected_group_col, "None") && !selected_group_col %in% nm)) {
+      selected_group_col <- mapping_guess$group$value
     }
 
     tagList(
@@ -4892,15 +6226,88 @@ server <- function(input, output, session) {
         "response_col",
         "Response column",
         choices = nm,
-        selected = guess_column(df, c("response", "signal", "viability", "inhibition", "activity", "effect"), nm[min(2, length(nm))])
+        selected = selected_response_col
       ),
       selectInput(
         "group_col",
         "Group or compound column",
         choices = c("None", nm),
-        selected = if ("compound" %in% nm) "compound" else if ("group" %in% nm) "group" else "None"
+        selected = selected_group_col
       )
     )
+  })
+
+  output$import_summary_ui <- renderUI({
+    info <- current_import_info()
+    overall_status <- overall_import_status(info)
+    summary_bits <- c(
+      sprintf("Rows: %s", info$metadata$rows %||% 0),
+      sprintf("Columns: %s", info$metadata$columns %||% 0),
+      if (!is.na(info$metadata$separator_label %||% NA_character_)) sprintf("Separator: %s", info$metadata$separator_label),
+      if (!is.na(info$metadata$decimal_mark %||% NA_character_)) sprintf("Decimal mark: %s", info$metadata$decimal_mark),
+      if (nzchar(info$sheet %||% "")) sprintf("Sheet: %s", info$sheet)
+    )
+    summary_bits <- summary_bits[nzchar(summary_bits)]
+
+    tagList(
+      tags$div(
+        class = paste("analysis-summary-tip", import_status_box_class(overall_status)),
+        tags$strong("Source: "),
+        info$source_label,
+        tags$br(),
+        import_status_pill(overall_status),
+        if (length(summary_bits)) tags$span(paste(summary_bits, collapse = " | "))
+      ),
+      if (!is.null(info$error)) {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("problem")),
+          tags$strong("Import error: "),
+          info$error
+        )
+      } else {
+        tagList(
+          tags$div(
+            class = "analysis-summary-tip",
+            tags$strong("Suggested mapping"),
+            import_mapping_summary_ui(info$mapping)
+          ),
+          if (length(info$issues)) {
+            tags$div(
+              class = paste("analysis-summary-tip", import_status_box_class("problem")),
+              tags$strong("Potential read issues"),
+              tags$ul(
+                class = "analysis-summary-list",
+                lapply(info$issues, tags$li)
+              )
+            )
+          },
+          if (length(info$suggestions)) {
+            tags$div(
+              class = paste("analysis-summary-tip", import_status_box_class("warn")),
+              tags$strong("Checks to review"),
+              tags$ul(
+                class = "analysis-summary-list",
+                lapply(info$suggestions, tags$li)
+              )
+            )
+          }
+        )
+      }
+    )
+  })
+
+  observeEvent(current_import_info(), ignoreInit = TRUE, {
+    info <- current_import_info()
+    if (identical(info$signature, last_import_preview_signature())) {
+      return()
+    }
+
+    last_import_preview_signature(info$signature)
+    showModal(import_preview_modal(info))
+  })
+
+  observeEvent(input$show_import_preview, {
+    showModal(import_preview_modal(current_import_info()))
   })
 
   output$bioassay_mapping_ui <- renderUI({
