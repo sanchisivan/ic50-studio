@@ -33,7 +33,10 @@ IC50 Studio has two main jobs:
 ### Dose-response analysis features
 
 - import `csv`, `tsv`, `txt`, `xls`, and `xlsx`
+- paste tab-separated or comma-separated data copied from Excel
 - map your own dose, response, and group columns
+- review automatic import preview diagnostics before fitting
+- validate the raw data shape before fitting
 - normalize or transform responses before fitting
 - fit `4PL`, `5PL`, `3PL (Hill fixed = 1)`, `3PL (Bottom = 0)`, and `3PL (Top = 100)`
 - work in `IC50` or `EC50` mode
@@ -99,7 +102,9 @@ The app is divided into a left sidebar for controls and a main area with tabs fo
 Use this section to:
 
 - upload a file
+- paste tabular data copied from Excel
 - choose an Excel sheet when needed
+- review the automatic import preview and reopen it if needed
 - map the dose, response, and group columns
 
 #### `Analysis settings`
@@ -206,6 +211,9 @@ Shows the no-bootstrap comparison across all supported models when enabled.
 
 Shows:
 
+- validation warnings before fitting
+- a raw scatter plot on a log10 x-axis for a quick shape check
+- the first `10` raw rows for sanity-checking the import
 - the imported raw data
 - the prepared summary used for grouped fitting
 - the other-plot summary table
@@ -239,6 +247,8 @@ IC50 Studio accepts:
 - `XLSX`
 
 If you upload an Excel workbook, the app lets you choose the sheet.
+
+The `Paste data` tab also accepts tab-separated or comma-separated data copied from Excel or another table, as long as the first row contains headers.
 
 ### Minimum structure for dose-response fitting
 
@@ -288,6 +298,8 @@ For the dose-response workflow:
 - zero-dose rows are kept for preview and linear plots
 - zero-dose rows are excluded from the actual fit unless you enable `Include zero-dose rows in fitting`, which replaces concentration `0` with a small positive surrogate for log-style fitting
 
+Before you run the fit, the app also gives you a validation check in `Data Preview` so you can catch obvious data-shape problems early.
+
 ### Important rule for fitting
 
 Each fitted group needs at least `4` distinct dose values used for fitting.
@@ -299,6 +311,8 @@ If a group has fewer than `4` distinct fitted doses:
 - it stays visible in previews
 - it is counted in diagnostic notes
 - it is not fit successfully
+
+The validation block in `Data Preview` warns you about these groups before fitting.
 
 ### Units
 
@@ -342,11 +356,25 @@ This is the safest default workflow for most users.
 Use either:
 
 - `Upload data`
+- `Paste data`
 - `Use example dataset`
 
 If you load Excel, choose the correct sheet.
 
-### Step 2. Check column mapping
+After each upload, Excel-sheet change, or pasted-data parse, the app opens an `Import preview` window automatically. Use it to confirm the first rows, the suggested mapping, and any warnings about separators, headers, or suspicious variable names.
+
+### Step 2. Check import preview
+
+Review:
+
+- the detected separator for pasted or delimited text data
+- the first rows as read
+- the suggested mapping
+- any issues or checks shown by the app
+
+If needed, click `Open import preview` to reopen the same diagnostic window.
+
+### Step 3. Check column mapping
 
 Review:
 
@@ -356,7 +384,18 @@ Review:
 
 The app guesses sensible defaults from column names, but you should always confirm the mapping.
 
-### Step 3. Start with conservative settings
+### Step 4. Check `Data Preview`
+
+Before fitting, open `Data Preview` and review:
+
+- warnings about groups with fewer than `4` unique dose levels
+- warnings about non-numeric or missing mapped dose/response values
+- the first `10` raw rows
+- the raw scatter plot on a log10 x-axis
+
+This step is useful for spotting a swapped column, a missing header row, or a malformed import before spending time on model fitting.
+
+### Step 5. Start with conservative settings
 
 Recommended starting values:
 
@@ -368,7 +407,7 @@ Recommended starting values:
 - `Potency metric = IC50`
 - `Potency uncertainty = None`
 
-### Step 4. Decide whether the response needs transformation
+### Step 6. Decide whether the response needs transformation
 
 Examples:
 
@@ -376,7 +415,7 @@ Examples:
 - If the data are already in the desired biological direction, keep `As entered`.
 - Use `Mirror around min/max` only when you specifically want to reflect the response around the observed range.
 
-### Step 5. Decide whether to normalize
+### Step 7. Decide whether to normalize
 
 Use normalization when your raw response units vary or when you want a percent-like scale.
 
@@ -387,7 +426,7 @@ Useful choices:
 - `Normalize 100 to 0 (max to min)` when the highest response should become 0 and the lowest should become 100
 - `Normalize using manual 0% and 100% controls` when you want assay-control-based scaling
 
-### Step 6. Run a fast first fit
+### Step 8. Run a fast first fit
 
 Before spending time on bootstrap uncertainty:
 
@@ -395,7 +434,7 @@ Before spending time on bootstrap uncertainty:
 - optionally enable `Compare all models first (no bootstrap)`
 - click `Run analysis`
 
-### Step 7. Review the fit
+### Step 9. Review the fit
 
 Check:
 
@@ -405,7 +444,7 @@ Check:
 - the `fit_reason` column
 - the `Model Comparison` tab if comparison was enabled
 
-### Step 8. Only then enable uncertainty
+### Step 10. Only then enable uncertainty
 
 For final reporting:
 
@@ -418,7 +457,7 @@ A practical rule:
 - `50` iterations for a quick preview
 - `100` to `200` iterations as a better starting point for final reporting
 
-### Step 9. Customize the figure
+### Step 11. Customize the figure
 
 After the fit looks correct:
 
@@ -831,9 +870,29 @@ This makes the recommendation practical rather than purely mathematical.
 
 This tab helps you audit what the app is actually using.
 
+#### `Validation checks`
+
+This block appears before the larger tables and is meant to be reviewed before fitting. It shows:
+
+- warnings when any group has fewer than `4` unique positive dose levels
+- warnings when the mapped dose or response column contains non-numeric or missing values
+- warnings when some rows cannot be shown in the raw scatter plot because the log10 x-axis requires positive doses
+
+#### `Raw data preview`
+
+Shows the first `10` imported rows exactly as they were read.
+
+#### `Raw scatter plot`
+
+Shows a simple scatter plot using dose on a `log10` x-axis and response on the y-axis. This is a quick sanity check for:
+
+- whether the mapped dose and response columns make sense
+- whether multiple groups separate as expected
+- whether the overall curve shape looks plausible before fitting
+
 #### `Imported data`
 
-Shows the raw uploaded table or the example dataset.
+Shows the full raw uploaded table, pasted table, or example dataset.
 
 #### `Prepared summary`
 

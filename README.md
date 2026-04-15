@@ -13,7 +13,10 @@ The app was developed at the **Laboratory of Bioactive Peptides (LPB)**, Faculty
 ## Main capabilities
 
 - Import `csv`, `tsv`, `txt`, `xls`, and `xlsx` files
+- Paste tab-separated or comma-separated tables copied from Excel
 - Map your own dose, response, and optional group columns
+- Preview imported columns, suggested mapping, and read diagnostics before fitting
+- Validate raw data with warnings plus a quick scatter preview before running the fit
 - Accept either linear concentration columns or already `log10`-transformed concentration columns
 - Fit `4PL`, `5PL`, `3PL (Hill fixed = 1)`, `3PL (Bottom = 0)`, and `3PL (Top = 100)`
 - Report either `IC50` or `EC50`
@@ -46,24 +49,28 @@ shiny::runApp()
 ## Quick start
 
 1. Launch the app.
-2. Click `Use example dataset` or upload your own file.
-3. Map the `Concentration or dose column`, `Response column`, and optional `Group or compound column`.
-4. Set `Uploaded concentration values` so the app knows whether your file stores linear concentrations or already `log10`-transformed values.
-5. Start with `Fit curve using = Group means`.
-6. Keep `Potency uncertainty = None` during exploration.
-7. If you are unsure which equation fits best, enable `Compare all models first (no bootstrap)`.
-8. Click `Run analysis`.
-9. Review `Curve Plot`, `Fit Results`, and `Model Comparison`.
-10. Only after the fit looks right, enable bootstrap uncertainty for final reporting.
-11. Use the `Other Plots` tab if you want publication-style assay figures that do not require curve fitting.
+2. Click `Use example dataset`, upload your own file, or use the `Paste data` tab to paste a table copied from Excel.
+3. Review the automatic `Import preview` window to confirm how the table was read and what column mapping was suggested.
+4. Map the `Concentration or dose column`, `Response column`, and optional `Group or compound column`.
+5. Set `Uploaded concentration values` so the app knows whether your file stores linear concentrations or already `log10`-transformed values.
+6. Open `Data Preview` and check the validation warnings, raw-data preview, and scatter plot before fitting.
+7. Start with `Fit curve using = Group means`.
+8. Keep `Potency uncertainty = None` during exploration.
+9. If you are unsure which equation fits best, enable `Compare all models first (no bootstrap)`.
+10. Click `Run analysis`.
+11. Review `Curve Plot`, `Fit Results`, and `Model Comparison`.
+12. Only after the fit looks right, enable bootstrap uncertainty for final reporting.
+13. Use the `Other Plots` tab if you want publication-style assay figures that do not require curve fitting.
 
 ## Input data expectations
 
-For dose-response fitting, your file should contain:
+For dose-response fitting, your imported table should contain:
 
 - one numeric dose or concentration column
 - one numeric response column
 - one optional grouping column such as `compound`, `sample`, `treatment`, or `peptide`
+
+You can supply that table by uploading a supported file or by pasting a tab-separated or comma-separated block with a header row into the `Paste data` tab.
 
 Important behavior:
 
@@ -71,12 +78,20 @@ Important behavior:
 - The app accepts either linear concentrations such as `0.01`, `0.1`, `1`, or `10`, or already `log10`-transformed values such as `-2`, `-1`, `0`, or `1`. Use `Uploaded concentration values` to match your file.
 - Zero-dose rows in linear-concentration files are kept in the preview and can be used for `Normalize to zero-dose control (per group)`. By default they stay out of the nonlinear fit, but you can turn on `Include zero-dose rows in fitting` to replace concentration `0` with a small positive surrogate one log10 decade below the minimum positive concentration.
 - Each fitted group needs at least `4` distinct dose values used for fitting after any log10-to-linear conversion. By default the app counts only positive doses; when `Include zero-dose rows in fitting` is enabled, concentration `0` can count as one of those levels.
+- Before fitting, the app warns when a mapped dose or response column contains non-numeric or missing values, or when a group has fewer than `4` distinct positive doses.
 - The app does not assume a fixed concentration unit. You can use `nM`, `uM`, `ug/mL`, `mg/mL`, or any other unit as long as the dose column is numeric.
 - `IC50` and `EC50` are always reported in linear concentration units, even when the uploaded concentration column is already log10-transformed.
 - If you choose `Normalize using manual 0% and 100% controls`, the app applies `100 * (Y - control_0) / (control_100 - control_0)`.
 - If you choose `Normalize to zero-dose control (per group)`, the app applies `100 * Y / mean(Y at concentration 0)` when the zero-dose mean is non-zero. If that mean is `0`, the app keeps the zero-dose response as the `0%` baseline and maps the strongest observed response away from it to `100%`.
 
 An example file is included at [example_dose_response.csv](example_dose_response.csv).
+
+## Import preview and validation
+
+- After each file upload, Excel-sheet change, or pasted-data parse, the app opens an `Import preview` window automatically.
+- The import preview shows the detected separator when relevant, the first rows as read, suggested column mapping, variable names, and read diagnostics such as suspicious headers or non-numeric mapped columns.
+- The `Open import preview` button reopens that window at any time.
+- The `Data Preview` tab now includes a pre-fit validation block with warning messages, the first `10` raw rows, and a simple raw scatter plot with a `log10` x-axis so you can sanity-check the data shape before fitting.
 
 ## Dose-response highlights
 
@@ -170,6 +185,8 @@ The export settings panel controls file name, format, units, width, height, and 
 ## Troubleshooting
 
 - If a curve looks wrong, first check the mapped columns and `Curve direction`.
+- If imported columns look wrong, reopen `Import preview` and confirm the separator, header row, and suggested mapping.
+- If `Data Preview` warns that a group has fewer than `4` unique doses, expand the tested range or do not expect a stable sigmoidal fit for that group.
 - If many groups are flagged as `Top far above data` or `Bottom far below data`, try a simpler model or expand the tested concentration range.
 - If the app says the target was not reached, do not force a numeric IC50 or EC50. Report that the effect was not reached within the tested range.
 - If you want a boxplot, make sure your rows are raw replicate values. If your file already contains means plus SD or SEM, use a bar plot instead.

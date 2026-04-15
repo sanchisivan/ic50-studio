@@ -100,14 +100,19 @@ delimiter_label <- function(separator) {
 }
 
 detect_delimited_format <- function(path, filename = NULL) {
-  ext <- tolower(tools::file_ext(filename %||% path))
   raw_lines <- tryCatch(
     readLines(path, warn = FALSE, n = 6, encoding = "UTF-8"),
     error = function(e) character()
   )
+
+  detect_delimited_format_from_lines(raw_lines, filename = filename)
+}
+
+detect_delimited_format_from_lines <- function(raw_lines, filename = NULL, default_separator = NULL) {
+  ext <- tolower(tools::file_ext(filename %||% "pasted-data.txt"))
   raw_lines <- gsub("\ufeff", "", raw_lines, fixed = TRUE)
   sample_lines <- raw_lines[nzchar(trimws(raw_lines))]
-  candidate_separators <- c(",", ";", "\t", "|")
+  candidate_separators <- c("\t", ",", ";", "|")
 
   separator_scores <- vapply(candidate_separators, function(separator) {
     if (!length(sample_lines)) {
@@ -128,7 +133,9 @@ detect_delimited_format <- function(path, filename = NULL) {
     mean(positive_counts - 1) + consistency_bonus
   }, numeric(1))
 
-  default_separator <- if (ext %in% c("tsv", "txt")) "\t" else ","
+  if (is.null(default_separator)) {
+    default_separator <- if (ext %in% c("tsv", "txt")) "\t" else ","
+  }
   best_separator <- names(which.max(separator_scores))[1] %||% default_separator
   if (!is.finite(separator_scores[[best_separator]]) || separator_scores[[best_separator]] <= 0) {
     best_separator <- default_separator
@@ -150,6 +157,37 @@ read_delimited_input <- function(path, filename = NULL) {
   format_info <- detect_delimited_format(path, filename)
   data <- utils::read.table(
     path,
+    header = TRUE,
+    sep = format_info$separator,
+    dec = format_info$decimal_mark,
+    check.names = FALSE,
+    stringsAsFactors = FALSE,
+    fill = TRUE,
+    strip.white = TRUE,
+    comment.char = "",
+    quote = "\"'"
+  )
+
+  data <- as.data.frame(data, stringsAsFactors = FALSE)
+  attr(data, "import_format") <- format_info
+  data
+}
+
+read_delimited_text <- function(text, filename = "pasted-data.txt") {
+  text <- text %||% ""
+  if (!nzchar(trimws(text))) {
+    stop("Paste a table with a header row before using pasted data.")
+  }
+
+  text_lines <- unlist(strsplit(text, "\r\n|\n|\r", perl = TRUE), use.names = FALSE)
+  default_separator <- if (any(grepl("\t", text_lines, fixed = TRUE))) "\t" else ","
+  format_info <- detect_delimited_format_from_lines(
+    text_lines,
+    filename = filename,
+    default_separator = default_separator
+  )
+  data <- utils::read.table(
+    text = text,
     header = TRUE,
     sep = format_info$separator,
     dec = format_info$decimal_mark,
@@ -5465,6 +5503,26 @@ ui <- fluidPage(
       .sidebar-panel details[open] > summary::before {
         content: '-';
       }
+      .data-source-tabs .tab-content {
+        padding-top: 12px;
+      }
+      .data-source-tabs .nav-tabs {
+        margin-bottom: 0;
+      }
+      .data-source-tabs .nav-tabs > li > a {
+        padding: 8px 12px;
+      }
+      .paste-preview-box {
+        margin-top: 12px;
+      }
+      .paste-preview-table-wrap {
+        max-height: 220px;
+        overflow: auto;
+        border-radius: 10px;
+      }
+      .validation-note {
+        margin-top: 10px;
+      }
       .nav-tabs {
         border-bottom: 1px solid #eadfca;
       }
@@ -5571,10 +5629,39 @@ ui <- fluidPage(
           open = TRUE,
           tags$summary("Data and mapping"),
           br(),
-          fileInput("data_file", "Upload data", accept = c(".csv", ".tsv", ".txt", ".xls", ".xlsx")),
-          actionButton("load_example", "Use example dataset", class = "secondary-action"),
-          br(), br(),
-          uiOutput("sheet_ui"),
+          div(
+            class = "data-source-tabs",
+            tabsetPanel(
+              tabPanel(
+                "Upload file",
+                br(),
+                fileInput("data_file", "Upload data", accept = c(".csv", ".tsv", ".txt", ".xls", ".xlsx")),
+                actionButton("load_example", "Use example dataset", class = "secondary-action"),
+                br(),
+                br(),
+                uiOutput("sheet_ui")
+              ),
+              tabPanel(
+                "Paste data",
+                br(),
+                textAreaInput(
+                  "pasted_data",
+                  "Paste tabular data",
+                  rows = 8,
+                  width = "100%",
+                  placeholder = paste(
+                    "compound\tconcentration\tresponse",
+                    "A\t0.1\t12.3",
+                    "A\t1\t48.9",
+                    sep = "\n"
+                  )
+                ),
+                actionButton("use_pasted_data", "Use pasted data", class = "secondary-action"),
+                helpText("Paste headers plus rows copied from Excel or another table. Tab and comma separators are detected automatically."),
+                uiOutput("paste_preview_ui")
+              )
+            )
+          ),
           uiOutput("mapping_ui"),
           br(),
           actionButton("show_import_preview", "Open import preview", class = "secondary-action"),
@@ -5898,6 +5985,14 @@ ui <- fluidPage(
             br(),
             uiOutput("import_summary_ui"),
             br(),
+            h4("Validation checks"),
+            uiOutput("validation_summary_ui"),
+            br(),
+            plotOutput("validation_plot", height = "340px"),
+            br(),
+            h4("Raw data preview"),
+            DTOutput("validation_preview_table"),
+            br(),
             h4("Imported data"),
             DTOutput("raw_data_table"),
             br(),
@@ -6043,6 +6138,7 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
   source_mode <- reactiveVal("example")
+  pasted_import_info <- reactiveVal(NULL)
   last_import_preview_signature <- reactiveVal(NULL)
 
   observeEvent(input$data_file, {
@@ -6051,6 +6147,49 @@ server <- function(input, output, session) {
 
   observeEvent(input$load_example, {
     source_mode("example")
+  })
+
+  observeEvent(input$use_pasted_data, {
+    pasted_text <- input$pasted_data %||% ""
+    text_lines <- unlist(strsplit(pasted_text, "\r\n|\n|\r", perl = TRUE), use.names = FALSE)
+    default_separator <- if (any(grepl("\t", text_lines, fixed = TRUE))) "\t" else ","
+    import_result <- tryCatch(
+      {
+        data <- read_delimited_text(pasted_text, filename = "pasted-data.txt")
+        list(data = data, error = NULL)
+      },
+      error = function(e) {
+        list(data = NULL, error = conditionMessage(e))
+      }
+    )
+
+    parse_info <- attr(import_result$data, "import_format") %||% (
+      if (nzchar(trimws(pasted_text))) {
+        detect_delimited_format_from_lines(
+          text_lines,
+          filename = "pasted-data.txt",
+          default_separator = default_separator
+        )
+      } else {
+        NULL
+      }
+    )
+
+    info <- build_import_preview_info(
+      data = import_result$data,
+      source_label = "Pasted data",
+      filename = "pasted-data.txt",
+      parse_info = parse_info,
+      source_token = sprintf("paste-%s-%s", input$use_pasted_data %||% 0, nchar(trimws(pasted_text))),
+      error = import_result$error
+    )
+    pasted_import_info(info)
+
+    if (is.null(info$error)) {
+      source_mode("paste")
+    } else {
+      showNotification(info$error, type = "error", duration = 6)
+    }
   })
 
   observeEvent(input$plot_preset, {
@@ -6113,6 +6252,10 @@ server <- function(input, output, session) {
     if (identical(source_mode(), "example")) {
       return(sprintf("example-%s", input$load_example %||% 0))
     }
+    if (identical(source_mode(), "paste")) {
+      info <- pasted_import_info()
+      return(info$signature %||% sprintf("paste-%s", input$use_pasted_data %||% 0))
+    }
 
     req(input$data_file)
     paste(
@@ -6123,6 +6266,11 @@ server <- function(input, output, session) {
   })
 
   current_import_info <- reactive({
+    if (identical(source_mode(), "paste")) {
+      req(pasted_import_info())
+      return(pasted_import_info())
+    }
+
     if (identical(source_mode(), "example")) {
       return(build_import_preview_info(
         data = sample_dataset(),
@@ -6168,6 +6316,40 @@ server <- function(input, output, session) {
     )
   })
 
+  resolved_mapping_inputs <- reactive({
+    df <- current_data()
+    nm <- names(df)
+    validate(need(length(nm) > 0, "No columns available for mapping."))
+    mapping_guess <- guess_mapping_columns(df)
+
+    selected_dose_col <- input$dose_col
+    if (is.null(selected_dose_col) || !selected_dose_col %in% nm) {
+      selected_dose_col <- mapping_guess$dose$value
+    }
+
+    selected_dose_scale <- input$dose_scale
+    if (is.null(selected_dose_scale) || !selected_dose_scale %in% c(dose_scale_linear, dose_scale_log10)) {
+      selected_dose_scale <- guess_dose_scale(df, selected_dose_col)
+    }
+
+    selected_response_col <- input$response_col
+    if (is.null(selected_response_col) || !selected_response_col %in% nm) {
+      selected_response_col <- mapping_guess$response$value
+    }
+
+    selected_group_col <- input$group_col
+    if (is.null(selected_group_col) || (!identical(selected_group_col, "None") && !selected_group_col %in% nm)) {
+      selected_group_col <- mapping_guess$group$value
+    }
+
+    list(
+      dose_col = selected_dose_col,
+      dose_scale = selected_dose_scale,
+      response_col = selected_response_col,
+      group_col = selected_group_col
+    )
+  })
+
   current_data <- reactive({
     info <- current_import_info()
     validate(
@@ -6185,27 +6367,46 @@ server <- function(input, output, session) {
     selectInput("sheet_name", "Excel sheet", choices = sheets, selected = sheets[1])
   })
 
+  output$paste_preview_ui <- renderUI({
+    info <- pasted_import_info()
+    if (is.null(info)) {
+      return(NULL)
+    }
+
+    overall_status <- overall_import_status(info)
+    summary_bits <- c(
+      sprintf("Rows: %s", info$metadata$rows %||% 0),
+      sprintf("Columns: %s", info$metadata$columns %||% 0),
+      if (!is.na(info$metadata$separator_label %||% NA_character_)) sprintf("Separator: %s", info$metadata$separator_label)
+    )
+    summary_bits <- summary_bits[nzchar(summary_bits)]
+
+    tags$div(
+      class = "paste-preview-box",
+      tags$div(
+        class = paste("analysis-summary-tip", import_status_box_class(overall_status)),
+        tags$strong("Parsed paste"),
+        tags$br(),
+        import_status_pill(overall_status),
+        if (length(summary_bits)) tags$span(paste(summary_bits, collapse = " | ")),
+        if (!is.null(info$error)) {
+          tags$div(class = "validation-note", info$error)
+        }
+      ),
+      if (is.null(info$error) && nrow(info$preview_rows)) {
+        tags$div(
+          class = "paste-preview-table-wrap",
+          import_preview_data_table(info, max_rows = 4)
+        )
+      }
+    )
+  })
+
   output$mapping_ui <- renderUI({
     df <- current_data()
     nm <- names(df)
     req(length(nm) > 0)
-    mapping_guess <- guess_mapping_columns(df)
-    selected_dose_col <- isolate(input$dose_col)
-    if (is.null(selected_dose_col) || !selected_dose_col %in% nm) {
-      selected_dose_col <- mapping_guess$dose$value
-    }
-    selected_dose_scale <- isolate(input$dose_scale)
-    if (is.null(selected_dose_scale) || !selected_dose_scale %in% c(dose_scale_linear, dose_scale_log10)) {
-      selected_dose_scale <- guess_dose_scale(df, selected_dose_col)
-    }
-    selected_response_col <- isolate(input$response_col)
-    if (is.null(selected_response_col) || !selected_response_col %in% nm) {
-      selected_response_col <- mapping_guess$response$value
-    }
-    selected_group_col <- isolate(input$group_col)
-    if (is.null(selected_group_col) || (!identical(selected_group_col, "None") && !selected_group_col %in% nm)) {
-      selected_group_col <- mapping_guess$group$value
-    }
+    resolved_mapping <- resolved_mapping_inputs()
 
     tagList(
       h4("Column mapping"),
@@ -6213,26 +6414,26 @@ server <- function(input, output, session) {
         "dose_col",
         "Concentration or dose column",
         choices = nm,
-        selected = selected_dose_col
+        selected = resolved_mapping$dose_col
       ),
       selectInput(
         "dose_scale",
         "Uploaded concentration values",
         choices = c(dose_scale_linear, dose_scale_log10),
-        selected = selected_dose_scale
+        selected = resolved_mapping$dose_scale
       ),
       helpText("Choose linear for values like 0.01, 0.1, 1, or 10. Choose log10-transformed for values like -2, -1, 0, 1 or 1.10, 1.40, 1.70. The app reports IC50 or EC50 back in linear concentration units."),
       selectInput(
         "response_col",
         "Response column",
         choices = nm,
-        selected = selected_response_col
+        selected = resolved_mapping$response_col
       ),
       selectInput(
         "group_col",
         "Group or compound column",
         choices = c("None", nm),
-        selected = selected_group_col
+        selected = resolved_mapping$group_col
       )
     )
   })
@@ -6308,6 +6509,198 @@ server <- function(input, output, session) {
 
   observeEvent(input$show_import_preview, {
     showModal(import_preview_modal(current_import_info()))
+  })
+
+  validation_info <- reactive({
+    df <- current_data()
+    mapping <- resolved_mapping_inputs()
+    validate(
+      need(mapping$dose_col %in% names(df), "Select a concentration or dose column to validate the data."),
+      need(mapping$response_col %in% names(df), "Select a response column to validate the data.")
+    )
+
+    group_values <- if (is.null(mapping$group_col) || identical(mapping$group_col, "None") || !mapping$group_col %in% names(df)) {
+      rep("Series 1", nrow(df))
+    } else {
+      as.character(df[[mapping$group_col]])
+    }
+    group_values[is.na(group_values) | !nzchar(trimws(group_values))] <- "Missing group"
+
+    dose_loaded <- suppressWarnings(as.numeric(df[[mapping$dose_col]]))
+    response_values <- suppressWarnings(as.numeric(df[[mapping$response_col]]))
+    invalid_dose_count <- sum(!is.finite(dose_loaded))
+    invalid_response_count <- sum(!is.finite(response_values))
+
+    plot_df <- data.frame(
+      group = group_values,
+      dose_loaded = dose_loaded,
+      response = response_values,
+      stringsAsFactors = FALSE
+    )
+    plot_df <- plot_df[is.finite(plot_df$dose_loaded) & is.finite(plot_df$response), , drop = FALSE]
+    plot_df$dose <- if (nrow(plot_df)) {
+      convert_uploaded_dose_to_linear(plot_df$dose_loaded, dose_scale = mapping$dose_scale %||% dose_scale_linear)
+    } else {
+      numeric()
+    }
+
+    omitted_plot_rows <- sum(!is.finite(plot_df$dose) | plot_df$dose <= 0, na.rm = TRUE)
+    plot_df <- plot_df[is.finite(plot_df$dose) & plot_df$dose > 0, c("group", "dose", "response"), drop = FALSE]
+
+    diagnostics_df <- if (nrow(plot_df)) {
+      group_diagnostics(plot_df)
+    } else {
+      data.frame(
+        group = character(),
+        n_points = integer(),
+        distinct_doses = integer(),
+        can_fit = logical(),
+        stringsAsFactors = FALSE
+      )
+    }
+    low_dose_groups <- diagnostics_df[diagnostics_df$distinct_doses < 4, , drop = FALSE]
+
+    list(
+      raw_preview = utils::head(df, 10),
+      plot_df = plot_df,
+      diagnostics = diagnostics_df,
+      low_dose_groups = low_dose_groups,
+      invalid_dose_count = invalid_dose_count,
+      invalid_response_count = invalid_response_count,
+      omitted_plot_rows = omitted_plot_rows,
+      dose_col = mapping$dose_col,
+      response_col = mapping$response_col,
+      has_group = !identical(mapping$group_col, "None")
+    )
+  })
+
+  output$validation_summary_ui <- renderUI({
+    info <- validation_info()
+    warning_items <- character()
+
+    if (nrow(info$low_dose_groups)) {
+      warning_items <- c(
+        warning_items,
+        sprintf(
+          "These groups have fewer than 4 unique dose levels and may not support a stable curve fit: %s.",
+          format_problem_groups(info$low_dose_groups)
+        )
+      )
+    }
+    if (info$invalid_dose_count > 0) {
+      warning_items <- c(
+        warning_items,
+        sprintf(
+          "%s row(s) in '%s' are non-numeric or NA and will be excluded from fitting.",
+          info$invalid_dose_count,
+          info$dose_col
+        )
+      )
+    }
+    if (info$invalid_response_count > 0) {
+      warning_items <- c(
+        warning_items,
+        sprintf(
+          "%s row(s) in '%s' are non-numeric or NA and will be excluded from fitting.",
+          info$invalid_response_count,
+          info$response_col
+        )
+      )
+    }
+    if (info$omitted_plot_rows > 0) {
+      warning_items <- c(
+        warning_items,
+        sprintf(
+          "%s row(s) were omitted from the raw preview plot because the log10 x-axis requires positive dose values.",
+          info$omitted_plot_rows
+        )
+      )
+    }
+    if (!nrow(info$plot_df)) {
+      warning_items <- c(
+        warning_items,
+        "No valid numeric dose/response pairs are available for the raw preview plot yet."
+      )
+    }
+
+    tagList(
+      if (length(warning_items)) {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("warn")),
+          tags$strong("Checks before fitting"),
+          tags$ul(
+            class = "analysis-summary-list",
+            lapply(warning_items, tags$li)
+          )
+        )
+      } else {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("ok")),
+          tags$strong("Checks before fitting"),
+          tags$div(class = "validation-note", "The mapped dose and response columns look usable, and every detected group has at least 4 unique positive dose levels.")
+        )
+      },
+      if (nrow(info$diagnostics)) {
+        tags$div(
+          class = "analysis-summary-tip",
+          tags$strong("Group summary"),
+          tags$div(
+            class = "validation-note",
+            sprintf(
+              "%s of %s group(s) have at least 4 unique positive dose levels.",
+              sum(info$diagnostics$can_fit),
+              nrow(info$diagnostics)
+            )
+          )
+        )
+      }
+    )
+  })
+
+  output$validation_plot <- renderPlot({
+    info <- validation_info()
+    validate(
+      need(
+        nrow(info$plot_df) > 0,
+        "No positive numeric dose/response pairs are available for the raw preview plot."
+      )
+    )
+
+    has_multiple_groups <- length(unique(info$plot_df$group)) > 1
+    if (has_multiple_groups) {
+      p <- ggplot(info$plot_df, aes(x = dose, y = response, color = group)) +
+        geom_point(size = 2.6, alpha = 0.82)
+    } else {
+      p <- ggplot(info$plot_df, aes(x = dose, y = response)) +
+        geom_point(size = 2.6, alpha = 0.82, color = "#0f766e")
+    }
+
+    p +
+      scale_x_log10() +
+      labs(
+        x = "Concentration / dose",
+        y = "Response",
+        color = if (info$has_group && has_multiple_groups) "Group" else NULL
+      ) +
+      theme_minimal(base_size = 13) +
+      theme(
+        panel.grid.minor = element_blank(),
+        legend.position = if (has_multiple_groups) "bottom" else "none"
+      )
+  })
+
+  output$validation_preview_table <- renderDT({
+    datatable(
+      validation_info()$raw_preview,
+      rownames = FALSE,
+      options = list(
+        dom = "t",
+        paging = FALSE,
+        searching = FALSE,
+        info = FALSE,
+        scrollX = TRUE
+      )
+    )
   })
 
   output$bioassay_mapping_ui <- renderUI({
