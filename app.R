@@ -4132,6 +4132,98 @@ publication_palette <- function(n, palette_name) {
   rep(values, length.out = n)
 }
 
+is_valid_color_value <- function(color_value) {
+  color_value <- trimws(as.character(color_value %||% ""))
+  if (!nzchar(color_value)) {
+    return(FALSE)
+  }
+
+  isTRUE(tryCatch({
+    grDevices::col2rgb(color_value)
+    TRUE
+  }, error = function(e) FALSE))
+}
+
+parse_series_color_map <- function(text) {
+  raw_lines <- unlist(strsplit(text %||% "", "\r\n|\n|\r", perl = TRUE), use.names = FALSE)
+  mapping <- character()
+  labels_by_key <- character()
+  invalid_lines <- character()
+  duplicate_labels <- character()
+
+  for (line in raw_lines) {
+    trimmed_line <- trimws(line)
+    if (!nzchar(trimmed_line)) {
+      next
+    }
+
+    parts <- regmatches(trimmed_line, regexec("^(.*?)\\s*(=|:)\\s*(.+)$", trimmed_line, perl = TRUE))[[1]]
+    if (length(parts) != 4) {
+      invalid_lines <- c(invalid_lines, trimmed_line)
+      next
+    }
+
+    label <- trimws(parts[2])
+    color_value <- trimws(parts[4])
+    if (!nzchar(label) || !is_valid_color_value(color_value)) {
+      invalid_lines <- c(invalid_lines, trimmed_line)
+      next
+    }
+
+    normalized_label <- tolower(label)
+    if (normalized_label %in% names(mapping)) {
+      duplicate_labels <- c(duplicate_labels, label)
+    }
+
+    mapping[normalized_label] <- color_value
+    labels_by_key[normalized_label] <- label
+  }
+
+  list(
+    mapping = mapping,
+    labels = labels_by_key,
+    invalid_lines = unique(invalid_lines),
+    duplicate_labels = unique(duplicate_labels)
+  )
+}
+
+resolve_series_palette <- function(levels, palette_name, color_text = NULL) {
+  levels <- as.character(levels %||% character())
+  levels <- levels[nzchar(trimws(levels))]
+  palette_values <- publication_palette(length(levels), palette_name)
+  names(palette_values) <- levels
+
+  parsed_map <- parse_series_color_map(color_text)
+  if (!length(levels) || !length(parsed_map$mapping)) {
+    return(list(
+      values = palette_values,
+      matched_labels = character(),
+      unmatched_labels = unname(parsed_map$labels),
+      invalid_lines = parsed_map$invalid_lines,
+      duplicate_labels = parsed_map$duplicate_labels
+    ))
+  }
+
+  level_lookup <- setNames(levels, tolower(trimws(levels)))
+  matched_keys <- intersect(names(parsed_map$mapping), names(level_lookup))
+  if (length(matched_keys)) {
+    matched_levels <- unname(level_lookup[matched_keys])
+    palette_values[matched_levels] <- unname(parsed_map$mapping[matched_keys])
+  } else {
+    matched_levels <- character()
+  }
+
+  unmatched_keys <- setdiff(names(parsed_map$mapping), names(level_lookup))
+
+  list(
+    values = palette_values,
+    matched_labels = unique(matched_levels),
+    unmatched_labels = unique(unname(parsed_map$labels[unmatched_keys])),
+    invalid_lines = parsed_map$invalid_lines,
+    duplicate_labels = parsed_map$duplicate_labels
+  )
+}
+
 publication_shapes <- function(n) {
   rep(c(16, 15, 17, 25, 18, 19, 0, 1, 2, 5), length.out = n)
 }
@@ -4392,8 +4484,11 @@ resolve_plotmath_label <- function(label_text, force_bold = FALSE) {
 
 build_plot <- function(prepared, fit_data, input) {
   groups <- unique(prepared$raw$group)
-  palette_values <- publication_palette(length(groups), input$palette_name)
-  names(palette_values) <- groups
+  palette_values <- resolve_series_palette(
+    levels = groups,
+    palette_name = input$palette_name,
+    color_text = input$series_color_map
+  )$values
   shape_values <- publication_shapes(length(groups))
   names(shape_values) <- groups
   single_shape_value <- resolve_single_point_shape(input$single_point_shape)
@@ -4677,8 +4772,11 @@ build_bioassay_plot <- function(prepared, input) {
   has_series <- !is.null(prepared$series_label) &&
     length(unique(as.character(raw_df$series))) > 1
   series_levels <- levels(raw_df$series)
-  palette_values <- publication_palette(length(series_levels), input$palette_name)
-  names(palette_values) <- series_levels
+  palette_values <- resolve_series_palette(
+    levels = series_levels,
+    palette_name = input$palette_name,
+    color_text = input$series_color_map
+  )$values
   legend_labels <- format_legend_labels(series_levels, input$legend_label_decimals %||% 2)
   legend_name <- if (has_series) {
     resolve_plotmath_label(
@@ -6089,6 +6187,20 @@ ui <- fluidPage(
             choices = c("Bright contrast", "All black", "Colorblind safe", "Nature muted", "Black and gray", "Earth tones", "Viridis"),
             selected = "Bright contrast"
           ),
+          textAreaInput(
+            "series_color_map",
+            "Fixed colors for specific series / compounds",
+            rows = 4,
+            width = "100%",
+            placeholder = paste(
+              "Compound A = #1f77b4",
+              "Compound B = #d62728",
+              "Control = black",
+              sep = "\n"
+            )
+          ),
+          helpText("Optional. Add one label-color pair per line using = or :. Matching ignores upper/lower case, and the same mapping is reused in the curve plot and the Other Plots module."),
+          uiOutput("series_color_map_status_ui"),
           selectInput(
             "legend_position",
             "Legend position",
@@ -6763,6 +6875,110 @@ server <- function(input, output, session) {
         choices = c("None", nm),
         selected = resolved_mapping$group_col
       )
+    )
+  })
+
+  output$series_color_map_status_ui <- renderUI({
+    parsed_map <- parse_series_color_map(input$series_color_map %||% "")
+    if (!length(parsed_map$mapping) && !length(parsed_map$invalid_lines)) {
+      return(NULL)
+    }
+
+    df <- tryCatch(current_data(), error = function(e) NULL)
+    curve_levels <- character()
+    bioassay_levels <- character()
+
+    if (!is.null(df) && nrow(df) > 0) {
+      mapping <- tryCatch(resolved_mapping_inputs(), error = function(e) NULL)
+      if (!is.null(mapping) && !identical(mapping$group_col, "None") && mapping$group_col %in% names(df)) {
+        curve_levels <- unique(trimws(as.character(df[[mapping$group_col]])))
+        curve_levels <- curve_levels[nzchar(curve_levels)]
+      }
+
+      bioassay_series_col <- input$bioassay_series_col %||% "None"
+      if (!identical(bioassay_series_col, "None") && bioassay_series_col %in% names(df)) {
+        bioassay_levels <- unique(trimws(as.character(df[[bioassay_series_col]])))
+        bioassay_levels <- bioassay_levels[nzchar(bioassay_levels)]
+      }
+    }
+
+    curve_palette_info <- resolve_series_palette(
+      levels = curve_levels,
+      palette_name = input$palette_name,
+      color_text = input$series_color_map
+    )
+    bioassay_palette_info <- resolve_series_palette(
+      levels = bioassay_levels,
+      palette_name = input$palette_name,
+      color_text = input$series_color_map
+    )
+
+    matched_curve <- curve_palette_info$matched_labels
+    matched_bioassay <- setdiff(bioassay_palette_info$matched_labels, matched_curve)
+    unmatched_labels <- unique(c(curve_palette_info$unmatched_labels, bioassay_palette_info$unmatched_labels))
+    parsed_labels <- unname(parsed_map$labels)
+
+    tagList(
+      if (length(parsed_labels)) {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("ok")),
+          tags$strong("Fixed color entries"),
+          tags$ul(
+            class = "analysis-summary-list",
+            lapply(parsed_labels, function(label) {
+              color_value <- unname(parsed_map$mapping[tolower(label)])[1]
+              tags$li(
+                tags$span(
+                  style = sprintf(
+                    "display:inline-block;width:12px;height:12px;border-radius:50%%;margin-right:8px;vertical-align:middle;background:%s;border:1px solid rgba(17,24,39,0.25);",
+                    color_value
+                  )
+                ),
+                sprintf("%s -> %s", label, color_value)
+              )
+            })
+          )
+        )
+      },
+      if (length(matched_curve)) {
+        tags$div(
+          class = "analysis-summary-tip",
+          tags$strong("Matched current curve groups"),
+          tags$div(class = "validation-note", paste(matched_curve, collapse = ", "))
+        )
+      },
+      if (length(matched_bioassay)) {
+        tags$div(
+          class = "analysis-summary-tip",
+          tags$strong("Matched current other-plot series"),
+          tags$div(class = "validation-note", paste(matched_bioassay, collapse = ", "))
+        )
+      },
+      if (length(unmatched_labels)) {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("warn")),
+          tags$strong("Not matched to the current plot setup"),
+          tags$div(class = "validation-note", paste(unmatched_labels, collapse = ", "))
+        )
+      },
+      if (length(parsed_map$duplicate_labels)) {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("warn")),
+          tags$strong("Repeated labels"),
+          tags$div(class = "validation-note", paste(parsed_map$duplicate_labels, collapse = ", ")),
+          tags$div(class = "validation-note", "The last color entered for each repeated label is the one the app uses.")
+        )
+      },
+      if (length(parsed_map$invalid_lines)) {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("problem")),
+          tags$strong("Lines the app could not read"),
+          tags$ul(
+            class = "analysis-summary-list",
+            lapply(parsed_map$invalid_lines, tags$li)
+          )
+        )
+      }
     )
   })
 
