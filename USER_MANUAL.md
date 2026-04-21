@@ -90,6 +90,7 @@ The built-in example dataset contains:
 - `3` replicates per concentration
 
 This example is useful because it works for both dose-response fitting and the `Other Plots` module.
+The `replicate` column in this example is included only to make the replicate structure explicit. Your own dataset does not need a separate `replicate` column if repeated observations already appear as separate rows for the same group and concentration.
 
 ## 3. Interface overview
 
@@ -105,6 +106,7 @@ Use this section to:
 - paste tabular data copied from Excel
 - choose an Excel sheet when needed
 - review the automatic import preview and reopen it if needed
+- edit the imported table directly in the `Table Editor` tab when you need to correct or paste data inside the app
 - map the dose, response, and group columns
 
 #### `Analysis settings`
@@ -140,6 +142,7 @@ This section controls the appearance of the main curve plot:
 - plot style
 - grid lines
 - palette
+- fixed colors for specific series or compounds
 - legend position and legend content
 - raw-point visibility
 - SD error bars
@@ -288,6 +291,8 @@ This layout works well because the app can:
 - compute raw-point overlays in plots
 - calculate automatic bar-plot letters from the raw replicate rows
 
+Important: the `replicate` column shown in this example is optional. The app does not require a column literally named `replicate`; it only needs the repeated observations to exist as separate rows.
+
 ### What happens during preparation
 
 For the dose-response workflow:
@@ -362,6 +367,8 @@ Use either:
 If you load Excel, choose the correct sheet.
 
 After each upload, Excel-sheet change, or pasted-data parse, the app opens an `Import preview` window automatically. Use it to confirm the first rows, the suggested mapping, and any warnings about separators, headers, or suspicious variable names.
+
+If you need to clean the imported table before fitting, open the `Table Editor` tab. With `rhandsontable` installed, the editor behaves like a small spreadsheet and can accept pasted columns or rectangular table blocks from Excel or another spreadsheet program.
 
 ### Step 2. Check import preview
 
@@ -977,6 +984,7 @@ Important controls include:
 - `Plot style`
 - `Plot grid lines`
 - `Palette`
+- `Fixed colors for specific series / compounds`
 - `Legend position`
 - `Legend content`
 - `Show legend title`
@@ -991,6 +999,16 @@ Important controls include:
 - `Base font size`
 - `Point size`
 - `Curve line width`
+
+Use `Fixed colors for specific series / compounds` when the same label should keep the same color across different figures. Enter one mapping per line, for example:
+
+```text
+Compound A = #1f77b4
+Compound B = #d62728
+Control = black
+```
+
+Matching ignores upper/lower case, and the same mapping is reused in both the main dose-response plot and the `Other Plots` module.
 
 ### `Curve plot axis breaks and limits`
 
@@ -1027,6 +1045,8 @@ Typical uses:
 - line plots for time-course or concentration-course summaries
 
 The module uses the same uploaded dataset as the curve-fitting workflow, but it has its own mapping and plot-specific controls.
+
+It also reuses the `Fixed colors for specific series / compounds` setting from `Plot styling options`, which is helpful when the same compound, treatment, or concentration should keep the same color in multiple figures.
 
 ### Column mapping
 

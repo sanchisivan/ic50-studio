@@ -1,5 +1,9 @@
 # IC50 Studio
 
+[![DOI](https://zenodo.org/badge/1203267905.svg)](https://doi.org/10.5281/zenodo.19609975)
+
+Zenodo DOI: `10.5281/zenodo.19609975`
+
 IC50 Studio is an open R Shiny app for dose-response analysis and publication-oriented figure making. It helps you load assay data, fit common sigmoid models, calculate IC50 or EC50 values, compare equations, review fit quality, and export plots and tables.
 
 The app was developed at the **Laboratory of Bioactive Peptides (LPB)**, Faculty of Biochemistry and Biological Sciences, National University of the Littoral (UNL), Santa Fe, Argentina.
@@ -29,6 +33,8 @@ The app was developed at the **Laboratory of Bioactive Peptides (LPB)**, Faculty
 - Export curve plots, fit tables, other plots, and other-plot summary tables
 - Build `Bar plot`, `Boxplot`, and `Line plot` figures in the `Other Plots` tab
 - Add manual annotation labels or automatic significance letters to bar plots
+- Edit uploaded or pasted data directly inside the app with the spreadsheet-style `Table Editor`
+- Keep the same compound or series colors across different plots with fixed label-to-color assignments
 
 ## Installation
 
@@ -36,6 +42,12 @@ Install the required packages once:
 
 ```r
 install.packages(c("shiny", "bslib", "ggplot2", "DT", "readxl"))
+```
+
+Optional but recommended for the best in-app table-editing experience:
+
+```r
+install.packages("rhandsontable")
 ```
 
 ## Run the app
@@ -51,16 +63,18 @@ shiny::runApp()
 1. Launch the app.
 2. Click `Use example dataset`, upload your own file, or use the `Paste data` tab to paste a table copied from Excel.
 3. Review the automatic `Import preview` window to confirm how the table was read and what column mapping was suggested.
-4. Map the `Concentration or dose column`, `Response column`, and optional `Group or compound column`.
-5. Set `Uploaded concentration values` so the app knows whether your file stores linear concentrations or already `log10`-transformed values.
-6. Open `Data Preview` and check the validation warnings, raw-data preview, and scatter plot before fitting.
-7. Start with `Fit curve using = Group means`.
-8. Keep `Potency uncertainty = None` during exploration.
-9. If you are unsure which equation fits best, enable `Compare all models first (no bootstrap)`.
-10. Click `Run analysis`.
-11. Review `Curve Plot`, `Fit Results`, and `Model Comparison`.
-12. Only after the fit looks right, enable bootstrap uncertainty for final reporting.
-13. Use the `Other Plots` tab if you want publication-style assay figures that do not require curve fitting.
+4. If needed, open the `Table Editor` tab to correct cells, paste full columns or table blocks, add rows, or remove rows before fitting.
+5. Map the `Concentration or dose column`, `Response column`, and optional `Group or compound column`.
+6. Set `Uploaded concentration values` so the app knows whether your file stores linear concentrations or already `log10`-transformed values.
+7. Open `Data Preview` and check the validation warnings, raw-data preview, and scatter plot before fitting.
+8. Start with `Fit curve using = Group means`.
+9. Keep `Potency uncertainty = None` during exploration.
+10. If you are unsure which equation fits best, enable `Compare all models first (no bootstrap)`.
+11. Click `Run analysis`.
+12. Review `Curve Plot`, `Fit Results`, and `Model Comparison`.
+13. Only after the fit looks right, enable bootstrap uncertainty for final reporting.
+14. If the same compounds or conditions should keep the same color across multiple figures, enter them in `Plot styling options > Fixed colors for specific series / compounds`.
+15. Use the `Other Plots` tab if you want publication-style assay figures that do not require curve fitting.
 
 ## Input data expectations
 
@@ -71,6 +85,7 @@ For dose-response fitting, your imported table should contain:
 - one optional grouping column such as `compound`, `sample`, `treatment`, or `peptide`
 
 You can supply that table by uploading a supported file or by pasting a tab-separated or comma-separated block with a header row into the `Paste data` tab.
+The built-in example dataset includes a `replicate` column, but that column is optional in your own data. The app can still summarize repeated rows that share the same group and concentration even when no replicate label column is present.
 
 Important behavior:
 
@@ -91,6 +106,7 @@ An example file is included at [example_dose_response.csv](example_dose_response
 - After each file upload, Excel-sheet change, or pasted-data parse, the app opens an `Import preview` window automatically.
 - The import preview shows the detected separator when relevant, the first rows as read, suggested column mapping, variable names, and read diagnostics such as suspicious headers or non-numeric mapped columns.
 - The `Open import preview` button reopens that window at any time.
+- The `Table Editor` tab lets you edit the imported table directly inside the app. With `rhandsontable` installed, you can paste full columns or rectangular blocks copied from Excel or another spreadsheet.
 - The `Data Preview` tab now includes a pre-fit validation block with warning messages, the first `10` raw rows, and a simple raw scatter plot with a `log10` x-axis so you can sanity-check the data shape before fitting.
 
 ## Dose-response highlights
@@ -135,6 +151,7 @@ Supported plot types:
 Useful details:
 
 - The module uses the same uploaded dataset as the curve-fitting workflow, but has its own `X`, `Y`, `Series / color`, `Facet`, and `Optional annotation` mapping.
+- The `Fixed colors for specific series / compounds` setting also applies here, so repeated labels can keep the same color across curve plots and other plots.
 - `Bar plot` and `Line plot` can summarize replicates with `Mean` or `Median`.
 - Available error bars are `SEM`, `SD`, `95% CI`, `IQR`, or `None`.
 - `Boxplot` is best for raw replicate distributions, not pre-summarized means.
