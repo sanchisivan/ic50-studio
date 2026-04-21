@@ -21,6 +21,8 @@ library(ggplot2)
 library(DT)
 library(readxl)
 
+has_rhandsontable <- requireNamespace("rhandsontable", quietly = TRUE)
+
 `%||%` <- function(x, y) {
   if (is.null(x) || length(x) == 0 || identical(x, "")) y else x
 }
@@ -202,6 +204,115 @@ read_delimited_text <- function(text, filename = "pasted-data.txt") {
   data <- as.data.frame(data, stringsAsFactors = FALSE)
   attr(data, "import_format") <- format_info
   data
+}
+
+copy_editor_data <- function(data) {
+  if (is.null(data)) {
+    return(NULL)
+  }
+
+  out <- data
+  out[] <- lapply(out, function(column) {
+    if (is.factor(column)) as.character(column) else column
+  })
+  rownames(out) <- NULL
+  out
+}
+
+blank_editor_value <- function(column) {
+  if (inherits(column, "POSIXct") || inherits(column, "POSIXt")) {
+    return(as.POSIXct(NA_real_, origin = "1970-01-01", tz = attr(column, "tzone") %||% "UTC"))
+  }
+  if (inherits(column, "Date")) {
+    return(as.Date(NA))
+  }
+  if (is.integer(column)) {
+    return(NA_integer_)
+  }
+  if (is.numeric(column)) {
+    return(NA_real_)
+  }
+  if (is.logical(column)) {
+    return(NA)
+  }
+
+  NA_character_
+}
+
+append_blank_editor_row <- function(data) {
+  data <- copy_editor_data(data)
+
+  if (is.null(data) || !ncol(data)) {
+    return(data.frame(value = NA_character_, stringsAsFactors = FALSE))
+  }
+
+  blank_row <- data.frame(
+    lapply(data, blank_editor_value),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  names(blank_row) <- names(data)
+  out <- rbind(data, blank_row)
+  rownames(out) <- NULL
+  out
+}
+
+coerce_editor_column <- function(values, template_column) {
+  if (inherits(template_column, "POSIXct") || inherits(template_column, "POSIXt")) {
+    values_chr <- as.character(values)
+    values_chr[!nzchar(trimws(values_chr))] <- NA_character_
+    return(suppressWarnings(as.POSIXct(values_chr, tz = attr(template_column, "tzone") %||% "UTC")))
+  }
+
+  if (inherits(template_column, "Date")) {
+    values_chr <- as.character(values)
+    values_chr[!nzchar(trimws(values_chr))] <- NA_character_
+    return(suppressWarnings(as.Date(values_chr)))
+  }
+
+  if (is.integer(template_column)) {
+    values_chr <- as.character(values)
+    values_chr[!nzchar(trimws(values_chr))] <- NA_character_
+    numeric_values <- suppressWarnings(as.numeric(values_chr))
+    return(as.integer(numeric_values))
+  }
+
+  if (is.numeric(template_column)) {
+    values_chr <- as.character(values)
+    values_chr[!nzchar(trimws(values_chr))] <- NA_character_
+    return(suppressWarnings(as.numeric(values_chr)))
+  }
+
+  if (is.logical(template_column)) {
+    values_chr <- tolower(trimws(as.character(values)))
+    values_chr[!nzchar(values_chr)] <- NA_character_
+    out <- rep(NA, length(values_chr))
+    out[values_chr %in% c("true", "t", "1", "yes")] <- TRUE
+    out[values_chr %in% c("false", "f", "0", "no")] <- FALSE
+    return(as.logical(out))
+  }
+
+  as.character(values)
+}
+
+coerce_editor_data <- function(data, template = NULL) {
+  if (is.null(data)) {
+    return(NULL)
+  }
+
+  out <- as.data.frame(data, stringsAsFactors = FALSE, check.names = FALSE)
+  rownames(out) <- NULL
+
+  if (is.null(template) || !ncol(out) || !ncol(template)) {
+    return(out)
+  }
+
+  shared_columns <- intersect(names(template), names(out))
+  for (column_name in shared_columns) {
+    out[[column_name]] <- coerce_editor_column(out[[column_name]], template[[column_name]])
+  }
+
+  out
 }
 
 guess_column <- function(data, patterns, fallback = NULL) {
@@ -3474,6 +3585,19 @@ analysis_summary_modal <- function(summary_info, comparison = NULL, selected_mod
   )
 }
 
+analysis_note_metric <- function(label, value, tone = "neutral") {
+  value_text <- trimws(as.character(value %||% ""))
+  if (!nzchar(value_text) || identical(value_text, "NA")) {
+    return(NULL)
+  }
+
+  tags$div(
+    class = paste("note-metric", paste0("note-metric-", tone)),
+    tags$div(class = "note-metric-label", label),
+    tags$div(class = "note-metric-value", value_text)
+  )
+}
+
 plotmath_examples_modal <- function() {
   modalDialog(
     title = "Plotmath Examples",
@@ -5232,6 +5356,150 @@ ui <- fluidPage(
         padding: 12px 14px;
         margin-bottom: 14px;
       }
+      .note-block-analysis {
+        border-left: 0;
+        border: 1px solid #eadfca;
+        background: linear-gradient(180deg, #fffdf9 0%, #fff7eb 100%);
+        padding: 14px 16px;
+      }
+      .note-shell {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .note-metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+        gap: 10px;
+      }
+      .note-metric {
+        background: rgba(255, 255, 255, 0.82);
+        border: 1px solid #eadfca;
+        border-radius: 12px;
+        padding: 10px 12px;
+        min-height: 76px;
+      }
+      .note-metric-highlight {
+        background: #effcf6;
+        border-color: #9bd5b4;
+      }
+      .note-metric-warn {
+        background: #fff7ed;
+        border-color: #fdba74;
+      }
+      .note-metric-label {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #7c5a35;
+        margin-bottom: 6px;
+      }
+      .note-metric-value {
+        font-size: 20px;
+        font-weight: 700;
+        line-height: 1.1;
+        color: #102a43;
+      }
+      .note-focus {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        flex-wrap: wrap;
+        background: linear-gradient(135deg, #ecfeff 0%, #f0fdfa 100%);
+        border: 1px solid #99f6e4;
+        border-radius: 14px;
+        padding: 12px 14px;
+      }
+      .note-focus-kicker {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #0f766e;
+        margin-bottom: 4px;
+      }
+      .note-focus-model {
+        font-size: 28px;
+        font-weight: 700;
+        line-height: 1;
+        color: #0f766e;
+      }
+      .note-focus-copy {
+        color: #3e4c59;
+        line-height: 1.45;
+        margin-top: 6px;
+        max-width: 560px;
+      }
+      .note-inline-stats {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        align-content: flex-start;
+      }
+      .note-inline-stat {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        background: rgba(255, 255, 255, 0.86);
+        border: 1px solid rgba(153, 246, 228, 0.9);
+        border-radius: 999px;
+        padding: 6px 10px;
+        font-size: 12px;
+        color: #234;
+      }
+      .note-callout {
+        border-radius: 12px;
+        border: 1px solid #eadfca;
+        padding: 10px 12px;
+      }
+      .note-callout-warn {
+        background: #fff8e8;
+        border-color: #f3c987;
+      }
+      .note-callout-ok {
+        background: #eefbf3;
+        border-color: #b7e4c7;
+      }
+      .note-callout-title {
+        font-weight: 700;
+        color: #102a43;
+        margin-bottom: 6px;
+      }
+      .note-callout ul {
+        padding-left: 18px;
+        margin: 0;
+      }
+      .note-callout li {
+        margin-bottom: 4px;
+      }
+      .note-callout li:last-child {
+        margin-bottom: 0;
+      }
+      .note-detail-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .note-detail-item {
+        display: inline-flex;
+        align-items: center;
+        background: rgba(255, 255, 255, 0.66);
+        border: 1px solid #eadfca;
+        border-radius: 999px;
+        padding: 6px 10px;
+        font-size: 12px;
+        color: #52606d;
+      }
+      @media (max-width: 767px) {
+        .note-focus-model {
+          font-size: 24px;
+        }
+        .note-metric-value {
+          font-size: 18px;
+        }
+      }
       .analysis-summary-list {
         padding-left: 18px;
         margin-bottom: 10px;
@@ -5520,6 +5788,18 @@ ui <- fluidPage(
         overflow: auto;
         border-radius: 10px;
       }
+      .table-editor-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .table-editor-box {
+        border: 1px solid #eadfca;
+        border-radius: 14px;
+        background: #fffdfa;
+        padding: 14px;
+      }
       .validation-note {
         margin-top: 10px;
       }
@@ -5637,6 +5917,7 @@ ui <- fluidPage(
                 br(),
                 fileInput("data_file", "Upload data", accept = c(".csv", ".tsv", ".txt", ".xls", ".xlsx")),
                 actionButton("load_example", "Use example dataset", class = "secondary-action"),
+                helpText("The example includes a replicate column, but your own dataset does not need one. Repeated rows at the same group and dose are enough."),
                 br(),
                 br(),
                 uiOutput("sheet_ui")
@@ -5665,7 +5946,7 @@ ui <- fluidPage(
           uiOutput("mapping_ui"),
           br(),
           actionButton("show_import_preview", "Open import preview", class = "secondary-action"),
-          helpText("A preview window opens automatically after each upload or Excel-sheet change.")
+          helpText("A preview window opens automatically after each upload or Excel-sheet change. Use the Table Editor tab to correct cells or remove bad rows before fitting.")
         ),
         tags$details(
           class = "well",
@@ -5953,7 +6234,7 @@ ui <- fluidPage(
       ),
       mainPanel(
         width = 8,
-        div(class = "note-block", textOutput("data_notes")),
+        uiOutput("data_notes_ui"),
         tabsetPanel(
           tabPanel(
             "Curve Plot",
@@ -5981,6 +6262,18 @@ ui <- fluidPage(
             DTOutput("model_comparison_table")
           ),
           tabPanel(
+            "Table Editor",
+            br(),
+            uiOutput("table_editor_status_ui"),
+            br(),
+            div(
+              class = "table-editor-box",
+              div(class = "table-editor-toolbar", uiOutput("table_editor_toolbar_ui")),
+              uiOutput("table_editor_help_ui"),
+              div(class = "editable-import-table", uiOutput("editable_import_table_ui"))
+            )
+          ),
+          tabPanel(
             "Data Preview",
             br(),
             uiOutput("import_summary_ui"),
@@ -5993,7 +6286,7 @@ ui <- fluidPage(
             h4("Raw data preview"),
             DTOutput("validation_preview_table"),
             br(),
-            h4("Imported data"),
+            h4("Current analysis data"),
             DTOutput("raw_data_table"),
             br(),
             h4("Prepared summary"),
@@ -6044,6 +6337,7 @@ ui <- fluidPage(
             h4("Data format"),
             tags$p("Supported files: CSV, TSV, TXT, XLS, XLSX."),
             tags$p("Recommended columns: one numeric concentration or dose column, one numeric response column, and an optional grouping column such as compound, sample, treatment, or replicate set."),
+            tags$p("A separate replicate column is optional. The built-in example includes one to make the replicate structure easy to see, but the app can summarize repeated rows even when no replicate label column is present."),
             tags$p("The app accepts either linear concentration values such as 0.01, 0.1, 1, or 10, or already log10-transformed concentration values such as -2, -1, 0, or 1. Use the 'Uploaded concentration values' selector in Column mapping so the app can interpret the dose column correctly."),
             tags$p("IC50 or EC50 is always reported back in linear concentration units. If the uploaded concentration column is already log10-transformed, the app converts it back to linear concentration before fitting, plotting, and reporting."),
             tags$p("If your file includes a zero-dose control, the app keeps it in the preview and can use it for 'Normalize to zero-dose control (per group)' when the uploaded dose column is in linear concentration units. By default those rows stay out of the nonlinear fit, but you can turn on 'Include zero-dose rows in fitting' to replace concentration 0 with a small positive surrogate and let it anchor the curve on log-style fits. When the zero-dose mean response is 0, the app treats that zero-dose point as the 0% baseline instead of dividing by zero."),
@@ -6140,6 +6434,10 @@ server <- function(input, output, session) {
   source_mode <- reactiveVal("example")
   pasted_import_info <- reactiveVal(NULL)
   last_import_preview_signature <- reactiveVal(NULL)
+  editable_data <- reactiveVal(NULL)
+  editable_source_signature <- reactiveVal(NULL)
+  editable_source_label <- reactiveVal("Imported data")
+  editable_is_modified <- reactiveVal(FALSE)
 
   observeEvent(input$data_file, {
     source_mode("file")
@@ -6316,6 +6614,40 @@ server <- function(input, output, session) {
     )
   })
 
+  observeEvent(current_import_info(), ignoreInit = FALSE, {
+    info <- current_import_info()
+    if (!is.null(info$error) || is.null(info$data)) {
+      return()
+    }
+
+    if (identical(info$signature, editable_source_signature())) {
+      return()
+    }
+
+    source_label <- info$source_label
+    if (nzchar(info$sheet %||% "")) {
+      source_label <- sprintf("%s (%s)", source_label, info$sheet)
+    }
+
+    editable_data(copy_editor_data(info$data))
+    editable_source_signature(info$signature)
+    editable_source_label(source_label)
+    editable_is_modified(FALSE)
+  })
+
+  current_editor_data <- reactive({
+    current_edit <- editable_data()
+    if (!is.null(current_edit)) {
+      return(current_edit)
+    }
+
+    info <- current_import_info()
+    validate(
+      need(is.null(info$error), info$error %||% "Unable to read the imported data.")
+    )
+    copy_editor_data(info$data)
+  })
+
   resolved_mapping_inputs <- reactive({
     df <- current_data()
     nm <- names(df)
@@ -6351,11 +6683,7 @@ server <- function(input, output, session) {
   })
 
   current_data <- reactive({
-    info <- current_import_info()
-    validate(
-      need(is.null(info$error), info$error %||% "Unable to read the imported data.")
-    )
-    info$data
+    current_editor_data()
   })
 
   output$sheet_ui <- renderUI({
@@ -6703,6 +7031,211 @@ server <- function(input, output, session) {
     )
   })
 
+  output$table_editor_status_ui <- renderUI({
+    df <- current_editor_data()
+    summary_bits <- c(
+      sprintf("Rows: %s", nrow(df)),
+      sprintf("Columns: %s", ncol(df)),
+      if (isTRUE(editable_is_modified())) "Edited values are active" else "Matches imported source"
+    )
+
+    tags$div(
+      class = paste(
+        "analysis-summary-tip",
+        import_status_box_class(
+          if (!isTRUE(has_rhandsontable)) "warn" else if (isTRUE(editable_is_modified())) "warn" else "ok"
+        )
+      ),
+      tags$strong("Spreadsheet editor"),
+      tags$br(),
+      tags$span(sprintf("Source: %s", editable_source_label() %||% "Imported data")),
+      tags$br(),
+      tags$span(paste(summary_bits, collapse = " | ")),
+      tags$div(
+        class = "validation-note",
+        if (!isTRUE(has_rhandsontable)) {
+          "Install the optional package 'rhandsontable' to unlock full spreadsheet-style copy/paste for whole columns and table blocks."
+        } else if (isTRUE(editable_is_modified())) {
+          "The edited table now overrides the original uploaded values until you reset it."
+        } else {
+          "The table is ready to edit. Any cell changes will feed directly into mapping, previews, and fitting."
+        }
+      )
+    )
+  })
+
+  output$table_editor_toolbar_ui <- renderUI({
+    controls <- list(
+      actionButton("add_editor_row", "Add empty row", class = "secondary-action")
+    )
+
+    if (!isTRUE(has_rhandsontable)) {
+      controls <- c(
+        controls,
+        list(actionButton("delete_editor_rows", "Delete selected rows", class = "secondary-action"))
+      )
+    }
+
+    controls <- c(
+      controls,
+      list(actionButton("reset_editor_table", "Reset to imported source", class = "secondary-action"))
+    )
+
+    do.call(tagList, controls)
+  })
+
+  output$table_editor_help_ui <- renderUI({
+    if (isTRUE(has_rhandsontable)) {
+      return(helpText("Click a cell and use Ctrl+C / Ctrl+V to copy or paste full columns or rectangular table blocks. Right-click inside the grid to insert or remove rows."))
+    }
+
+    helpText("Double-click any cell to edit it. The current fallback editor has limited clipboard support; install 'rhandsontable' for GraphPad-style copy/paste.")
+  })
+
+  output$editable_import_table_ui <- renderUI({
+    if (isTRUE(has_rhandsontable)) {
+      return(rhandsontable::rHandsontableOutput("editable_import_table_hot"))
+    }
+
+    DTOutput("editable_import_table_dt")
+  })
+
+  if (isTRUE(has_rhandsontable)) {
+    output$editable_import_table_hot <- rhandsontable::renderRHandsontable({
+      df <- current_editor_data()
+      hot <- rhandsontable::rhandsontable(
+        df,
+        rowHeaders = TRUE,
+        stretchH = "all",
+        width = "100%",
+        height = 420
+      )
+
+      for (column_name in names(df)) {
+        column_values <- df[[column_name]]
+        if (is.integer(column_values) || is.numeric(column_values)) {
+          hot <- rhandsontable::hot_col(
+            hot,
+            column_name,
+            type = "numeric",
+            numericFormat = list(pattern = "0.[0000000000]")
+          )
+        } else if (is.logical(column_values)) {
+          hot <- rhandsontable::hot_col(hot, column_name, type = "checkbox")
+        } else {
+          hot <- rhandsontable::hot_col(hot, column_name, type = "text")
+        }
+      }
+
+      rhandsontable::hot_table(
+        hot,
+        contextMenu = TRUE,
+        copyPaste = TRUE,
+        manualColumnResize = TRUE,
+        manualRowResize = TRUE,
+        outsideClickDeselects = FALSE
+      )
+    })
+
+    observeEvent(input$editable_import_table_hot, {
+      updated <- rhandsontable::hot_to_r(input$editable_import_table_hot)
+      if (is.null(updated)) {
+        return()
+      }
+
+      updated <- coerce_editor_data(updated, template = current_editor_data())
+      editable_data(copy_editor_data(updated))
+      editable_is_modified(TRUE)
+    }, ignoreNULL = TRUE)
+  }
+
+  output$editable_import_table_dt <- renderDT({
+    if (isTRUE(has_rhandsontable)) {
+      return(NULL)
+    }
+
+    datatable(
+      current_editor_data(),
+      rownames = FALSE,
+      selection = list(mode = "multiple", target = "row"),
+      editable = TRUE,
+      class = "stripe compact hover",
+      options = list(
+        pageLength = 12,
+        scrollX = TRUE,
+        scrollY = "360px",
+        scrollCollapse = TRUE
+      )
+    )
+  }, server = FALSE)
+
+  editable_table_proxy <- dataTableProxy("editable_import_table_dt")
+
+  observeEvent(input$editable_import_table_dt_cell_edit, {
+    if (isTRUE(has_rhandsontable)) {
+      return()
+    }
+
+    info <- input$editable_import_table_dt_cell_edit
+    updated <- DT::editData(current_editor_data(), info, rownames = FALSE)
+    editable_data(copy_editor_data(updated))
+    editable_is_modified(TRUE)
+    replaceData(editable_table_proxy, updated, resetPaging = FALSE, rownames = FALSE)
+  })
+
+  observeEvent(input$add_editor_row, {
+    updated <- append_blank_editor_row(current_editor_data())
+    editable_data(updated)
+    editable_is_modified(TRUE)
+    if (!isTRUE(has_rhandsontable)) {
+      replaceData(editable_table_proxy, updated, resetPaging = FALSE, rownames = FALSE)
+    }
+  })
+
+  observeEvent(input$delete_editor_rows, {
+    if (isTRUE(has_rhandsontable)) {
+      return()
+    }
+
+    selected_rows <- input$editable_import_table_dt_rows_selected %||% integer()
+    if (!length(selected_rows)) {
+      showNotification("Select one or more rows in the table before deleting them.", type = "message", duration = 4)
+      return()
+    }
+
+    current <- current_editor_data()
+    updated <- current[-selected_rows, , drop = FALSE]
+    if (!nrow(updated)) {
+      updated <- append_blank_editor_row(current[0, , drop = FALSE])
+    }
+
+    editable_data(copy_editor_data(updated))
+    editable_is_modified(TRUE)
+    replaceData(editable_table_proxy, updated, resetPaging = FALSE, rownames = FALSE)
+  })
+
+  observeEvent(input$reset_editor_table, {
+    info <- current_import_info()
+    if (!is.null(info$error) || is.null(info$data)) {
+      showNotification("There is no valid imported table available to reset to right now.", type = "error", duration = 5)
+      return()
+    }
+
+    source_label <- info$source_label
+    if (nzchar(info$sheet %||% "")) {
+      source_label <- sprintf("%s (%s)", source_label, info$sheet)
+    }
+
+    reset_data <- copy_editor_data(info$data)
+    editable_data(reset_data)
+    editable_source_signature(info$signature)
+    editable_source_label(source_label)
+    editable_is_modified(FALSE)
+    if (!isTRUE(has_rhandsontable)) {
+      replaceData(editable_table_proxy, reset_data, resetPaging = FALSE, rownames = FALSE)
+    }
+  })
+
   output$bioassay_mapping_ui <- renderUI({
     df <- current_data()
     nm <- names(df)
@@ -6918,29 +7451,185 @@ server <- function(input, output, session) {
     showModal(plotmath_examples_modal())
   })
 
-  output$data_notes <- renderText({
+  output$data_notes_ui <- renderUI({
     result <- analysis_result()
-    comparison_note <- NULL
-    if (!is.null(result$comparison)) {
-      comparison_note <- result$comparison$recommendation_text
+    prepared <- result$prepared
+    comparison <- result$comparison
+    summary_info <- summarize_analysis_results(result$fit$results)
+    diagnostics_df <- prepared$diagnostics
+    skipped_groups <- diagnostics_df[!diagnostics_df$can_fit, , drop = FALSE]
+    warning_groups <- unique(result$fit$results$group[
+      result$fit$results$fit_status == "OK" &
+        !is.na(result$fit$results$fit_warning) &
+        nzchar(result$fit$results$fit_warning)
+    ])
+    warning_groups <- warning_groups[nzchar(warning_groups)]
+
+    recommended_row <- NULL
+    if (!is.null(comparison) && nzchar(comparison$recommended_model %||% "")) {
+      recommended_row <- comparison$summary[
+        comparison$summary$model == comparison$recommended_model,
+        ,
+        drop = FALSE
+      ]
     }
 
-    note_parts <- c(result$prepared$notes, result$fit$message, comparison_note)
-    if (isTRUE(input$use_log10_axis) && isTRUE(result$prepared$zero_dose_rows > 0)) {
-      note_parts <- c(
-        note_parts,
-        if (isTRUE(result$prepared$zero_dose_in_fit)) {
-          sprintf(
-            "Zero-dose rows were included in the fit by replacing concentration 0 with %s. On the log10 x-axis those rows are plotted at that surrogate position because x = 0 cannot be drawn on a log scale.",
-            format_decimal_text(result$prepared$zero_dose_fit_value, 4)
-          )
-        } else {
-          "Zero-dose rows stay excluded from fitting. On the log10 x-axis they are hidden, but they can still be used for zero-dose control normalization."
-        }
+    attention_count <- sum(summary_info$counts[c(
+      status_not_reached,
+      status_extrapolated,
+      status_review_fit,
+      status_no_fit
+    )], na.rm = TRUE)
+
+    warning_items <- character()
+    if (nrow(skipped_groups) > 0) {
+      warning_items <- c(
+        warning_items,
+        sprintf("Too few dose levels to fit: %s.", format_problem_groups(skipped_groups))
       )
     }
-    note_parts <- note_parts[nzchar(note_parts)]
-    paste(note_parts, collapse = " | ")
+    if (length(warning_groups) > 0) {
+      warning_items <- c(
+        warning_items,
+        sprintf("Fit warnings detected for: %s.", paste(warning_groups, collapse = ", "))
+      )
+    }
+    if (isTRUE(summary_info$counts[[status_not_reached]] > 0)) {
+      warning_items <- c(
+        warning_items,
+        sprintf(
+          "%s group(s) did not reach the %s target within the tested range.",
+          summary_info$counts[[status_not_reached]],
+          potency_metric_label(input$potency_metric)
+        )
+      )
+    }
+    if (isTRUE(summary_info$counts[[status_extrapolated]] > 0)) {
+      warning_items <- c(
+        warning_items,
+        sprintf(
+          "%s group(s) produced extrapolated %s values.",
+          summary_info$counts[[status_extrapolated]],
+          potency_metric_label(input$potency_metric)
+        )
+      )
+    }
+    if (isTRUE(summary_info$counts[[status_review_fit]] > 0)) {
+      warning_items <- c(
+        warning_items,
+        sprintf(
+          "%s numeric %s value(s) are shown but still need fit review.",
+          summary_info$counts[[status_review_fit]],
+          potency_metric_label(input$potency_metric)
+        )
+      )
+    }
+    if (isTRUE(summary_info$counts[[status_no_fit]] > 0)) {
+      warning_items <- c(
+        warning_items,
+        sprintf("%s group(s) could not be fit with the current settings.", summary_info$counts[[status_no_fit]])
+      )
+    }
+
+    detail_items <- c(
+      sprintf("Scale: %s", if (identical(input$dose_scale, dose_scale_log10)) "Log10 input values" else "Linear input values"),
+      sprintf("Normalization: %s", input$normalization),
+      sprintf("Transform: %s", input$response_transform),
+      sprintf("Current model: %s", input$model_equation),
+      if (!identical(input$ic50_uncertainty, "None")) sprintf("Uncertainty: %s", input$ic50_uncertainty)
+    )
+    if (isTRUE(prepared$zero_dose_rows > 0)) {
+      zero_dose_detail <- sprintf(
+        "Zero-dose rows: %s (%s fit%s)",
+        prepared$zero_dose_rows,
+        if (isTRUE(prepared$zero_dose_in_fit)) "included in" else "excluded from",
+        if (isTRUE(input$use_log10_axis)) ", hidden on log10 axis" else ""
+      )
+      detail_items <- c(detail_items, zero_dose_detail)
+    }
+    detail_items <- detail_items[nzchar(detail_items)]
+
+    metric_cards <- Filter(Negate(is.null), list(
+      analysis_note_metric("Rows loaded", nrow(current_data())),
+      analysis_note_metric("Groups", nrow(diagnostics_df)),
+      analysis_note_metric("Fit-ready", sprintf("%s/%s", sum(diagnostics_df$can_fit), nrow(diagnostics_df))),
+      analysis_note_metric("Reportable", summary_info$counts[[status_report_numeric]], tone = "highlight"),
+      analysis_note_metric("Need review", attention_count, tone = if (isTRUE(attention_count > 0)) "warn" else "neutral")
+    ))
+
+    div(
+      class = "note-block note-block-analysis",
+      div(
+        class = "note-shell",
+        if (length(metric_cards)) {
+          div(class = "note-metrics", metric_cards)
+        },
+        if (!is.null(recommended_row) && nrow(recommended_row) == 1) {
+          div(
+            class = "note-focus",
+            div(
+              div(class = "note-focus-kicker", "Suggested model from comparison"),
+              div(class = "note-focus-model", comparison$recommended_model),
+              div(
+                class = "note-focus-copy",
+                sprintf(
+                  "Best no-bootstrap ranking for this run based on reportable numeric %s values, successful fits, and median R-squared.",
+                  potency_metric_label(input$potency_metric)
+                )
+              ),
+              if (!identical(input$model_equation, comparison$recommended_model)) {
+                div(
+                  class = "note-focus-copy",
+                  sprintf("Current selected model: %s.", input$model_equation)
+                )
+              }
+            ),
+            div(
+              class = "note-inline-stats",
+              tags$span(
+                class = "note-inline-stat",
+                tags$strong("Reportable"),
+                recommended_row$numeric_ic50_reportable[1]
+              ),
+              tags$span(
+                class = "note-inline-stat",
+                tags$strong("Groups fit"),
+                recommended_row$groups_fit[1]
+              ),
+              tags$span(
+                class = "note-inline-stat",
+                tags$strong("Review"),
+                recommended_row$review_before_reporting[1]
+              ),
+              tags$span(
+                class = "note-inline-stat",
+                tags$strong("Median R"),
+                format_signif_text(recommended_row$median_r_squared[1], 3)
+              )
+            )
+          )
+        },
+        if (length(warning_items)) {
+          tags$div(
+            class = "note-callout note-callout-warn",
+            tags$div(class = "note-callout-title", "Attention"),
+            tags$ul(lapply(warning_items, tags$li))
+          )
+        } else {
+          tags$div(
+            class = "note-callout note-callout-ok",
+            tags$div(class = "note-callout-title", "Run summary"),
+            tags$div("No immediate fit warnings were detected for this run.")
+          )
+        },
+        if (length(detail_items)) {
+          div(
+            class = "note-detail-list",
+            lapply(detail_items, function(item) tags$span(class = "note-detail-item", item))
+          )
+        }
+      )
+    )
   })
 
   output$bioassay_notes <- renderText({
