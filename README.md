@@ -35,6 +35,7 @@ The app was developed at the **Laboratory of Bioactive Peptides (LPB)**, Faculty
 - Add manual annotation labels or automatic significance letters to bar plots
 - Edit uploaded or pasted data directly inside the app with the spreadsheet-style `Table Editor`
 - Keep the same compound or series colors across different plots with fixed label-to-color assignments
+- Keep the same compound point shapes across curve plots with fixed label-to-shape assignments
 
 ## Installation
 
@@ -74,7 +75,8 @@ shiny::runApp()
 12. Review `Curve Plot`, `Fit Results`, and `Model Comparison`.
 13. Only after the fit looks right, enable bootstrap uncertainty for final reporting.
 14. If the same compounds or conditions should keep the same color across multiple figures, enter them in `Plot styling options > Fixed colors for specific series / compounds`.
-15. Use the `Other Plots` tab if you want publication-style assay figures that do not require curve fitting.
+15. If the same compounds should keep the same point shape in curve plots, enter them in `Plot styling options > Fixed point shapes for specific series / compounds`.
+16. Use the `Other Plots` tab if you want publication-style assay figures that do not require curve fitting.
 
 ## Input data expectations
 

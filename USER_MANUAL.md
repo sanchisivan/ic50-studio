@@ -143,6 +143,7 @@ This section controls the appearance of the main curve plot:
 - grid lines
 - palette
 - fixed colors for specific series or compounds
+- fixed point shapes for specific series or compounds
 - legend position and legend content
 - raw-point visibility
 - SD error bars
@@ -985,6 +986,7 @@ Important controls include:
 - `Plot grid lines`
 - `Palette`
 - `Fixed colors for specific series / compounds`
+- `Fixed point shapes for specific series / compounds`
 - `Legend position`
 - `Legend content`
 - `Show legend title`
@@ -1009,6 +1011,16 @@ Control = black
 ```
 
 Matching ignores upper/lower case, and the same mapping is reused in both the main dose-response plot and the `Other Plots` module.
+
+Use `Fixed point shapes for specific series / compounds` when the same curve group should keep the same point symbol across different curve figures. Enter one mapping per line, for example:
+
+```text
+Compound A = Filled circle
+Compound B = Filled square
+Control = 17
+```
+
+You can use the shape names shown in the app or ggplot shape numbers. If you enter a fixed shape mapping, the curve plot applies those shapes even when the single-symbol option was selected previously.
 
 ### `Curve plot axis breaks and limits`
 

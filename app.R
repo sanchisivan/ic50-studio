@@ -4187,6 +4187,10 @@ parse_series_color_map <- function(text) {
   )
 }
 
+normalize_series_mapping_label <- function(label) {
+  tolower(trimws(as.character(label %||% "")))
+}
+
 resolve_series_palette <- function(levels, palette_name, color_text = NULL) {
   levels <- as.character(levels %||% character())
   levels <- levels[nzchar(trimws(levels))]
@@ -4231,15 +4235,151 @@ publication_shapes <- function(n) {
 single_point_shape_choices <- function() {
   c(
     "Filled circle" = "16",
+    "Solid circle" = "19",
     "Open circle" = "1",
     "Filled square" = "15",
     "Open square" = "0",
     "Filled triangle" = "17",
+    "Filled inverted triangle" = "25",
     "Open triangle" = "2",
     "Filled diamond" = "18",
     "Open diamond" = "5",
     "Plus" = "3",
     "Cross" = "4"
+  )
+}
+
+point_shape_lookup <- function() {
+  choices <- single_point_shape_choices()
+  choice_lookup <- setNames(as.integer(unname(choices)), normalize_series_mapping_label(names(choices)))
+  synonym_lookup <- c(
+    "circle" = 16L,
+    "square" = 15L,
+    "triangle" = 17L,
+    "inverted triangle" = 25L,
+    "diamond" = 18L,
+    "+" = 3L,
+    "x" = 4L
+  )
+
+  c(choice_lookup, synonym_lookup)
+}
+
+parse_point_shape_value <- function(shape_value) {
+  shape_text <- trimws(as.character(shape_value %||% ""))
+  if (!nzchar(shape_text)) {
+    return(NA_integer_)
+  }
+
+  parsed_shape <- suppressWarnings(as.integer(shape_text))
+  if (is.finite(parsed_shape)) {
+    return(as.integer(parsed_shape))
+  }
+
+  normalized_shape <- normalize_series_mapping_label(shape_text)
+  shape_lookup <- point_shape_lookup()
+  if (normalized_shape %in% names(shape_lookup)) {
+    return(as.integer(unname(shape_lookup[normalized_shape])[1]))
+  }
+
+  NA_integer_
+}
+
+point_shape_label <- function(shape_value) {
+  parsed_shape <- parse_point_shape_value(shape_value)
+  if (!is.finite(parsed_shape)) {
+    return(trimws(as.character(shape_value %||% "")))
+  }
+
+  shape_choices <- single_point_shape_choices()
+  choice_codes <- as.integer(unname(shape_choices))
+  choice_match <- match(parsed_shape, choice_codes)
+  if (!is.na(choice_match)) {
+    return(names(shape_choices)[choice_match])
+  }
+
+  sprintf("Shape %s", parsed_shape)
+}
+
+parse_series_shape_map <- function(text) {
+  raw_lines <- unlist(strsplit(text %||% "", "\r\n|\n|\r", perl = TRUE), use.names = FALSE)
+  mapping <- integer()
+  labels_by_key <- character()
+  invalid_lines <- character()
+  duplicate_labels <- character()
+
+  for (line in raw_lines) {
+    trimmed_line <- trimws(line)
+    if (!nzchar(trimmed_line)) {
+      next
+    }
+
+    parts <- regmatches(trimmed_line, regexec("^(.*?)\\s*(=|:)\\s*(.+)$", trimmed_line, perl = TRUE))[[1]]
+    if (length(parts) != 4) {
+      invalid_lines <- c(invalid_lines, trimmed_line)
+      next
+    }
+
+    label <- trimws(parts[2])
+    shape_value <- parse_point_shape_value(parts[4])
+    if (!nzchar(label) || !is.finite(shape_value)) {
+      invalid_lines <- c(invalid_lines, trimmed_line)
+      next
+    }
+
+    normalized_label <- normalize_series_mapping_label(label)
+    if (normalized_label %in% names(mapping)) {
+      duplicate_labels <- c(duplicate_labels, label)
+    }
+
+    mapping[normalized_label] <- as.integer(shape_value)
+    labels_by_key[normalized_label] <- label
+  }
+
+  list(
+    mapping = mapping,
+    labels = labels_by_key,
+    invalid_lines = unique(invalid_lines),
+    duplicate_labels = unique(duplicate_labels)
+  )
+}
+
+resolve_series_shapes <- function(levels, shape_text = NULL) {
+  levels <- as.character(levels %||% character())
+  levels <- levels[nzchar(trimws(levels))]
+  shape_values <- publication_shapes(length(levels))
+  names(shape_values) <- levels
+
+  parsed_map <- parse_series_shape_map(shape_text)
+  if (!length(levels) || !length(parsed_map$mapping)) {
+    return(list(
+      values = shape_values,
+      matched_labels = character(),
+      unmatched_labels = unname(parsed_map$labels),
+      invalid_lines = parsed_map$invalid_lines,
+      duplicate_labels = parsed_map$duplicate_labels,
+      has_mapping = length(parsed_map$mapping) > 0
+    ))
+  }
+
+  level_lookup <- setNames(levels, normalize_series_mapping_label(levels))
+  matched_keys <- intersect(names(parsed_map$mapping), names(level_lookup))
+  if (length(matched_keys)) {
+    matched_levels <- unname(level_lookup[matched_keys])
+    shape_values[matched_levels] <- as.integer(unname(parsed_map$mapping[matched_keys]))
+  } else {
+    matched_levels <- character()
+  }
+
+  unmatched_keys <- setdiff(names(parsed_map$mapping), names(level_lookup))
+
+  list(
+    values = shape_values,
+    matched_labels = unique(matched_levels),
+    unmatched_labels = unique(unname(parsed_map$labels[unmatched_keys])),
+    invalid_lines = parsed_map$invalid_lines,
+    duplicate_labels = parsed_map$duplicate_labels,
+    has_mapping = length(parsed_map$mapping) > 0
   )
 }
 
@@ -4489,8 +4629,9 @@ build_plot <- function(prepared, fit_data, input) {
     palette_name = input$palette_name,
     color_text = input$series_color_map
   )$values
-  shape_values <- publication_shapes(length(groups))
-  names(shape_values) <- groups
+  shape_info <- resolve_series_shapes(groups, input$series_shape_map)
+  shape_values <- shape_info$values
+  use_group_shapes <- isTRUE(input$use_group_shapes) || isTRUE(shape_info$has_mapping)
   single_shape_value <- resolve_single_point_shape(input$single_point_shape)
   legend_name <- resolve_plotmath_label(
     resolve_legend_title(input$show_legend_title, input$legend_title, "Series"),
@@ -4598,7 +4739,7 @@ build_plot <- function(prepared, fit_data, input) {
   p <- ggplot()
 
   if (isTRUE(input$show_raw_points)) {
-    if (isTRUE(input$use_group_shapes)) {
+    if (isTRUE(use_group_shapes)) {
       p <- p + geom_point(
         data = plot_raw_df,
         aes(x = dose, y = response, color = group, shape = group),
@@ -4645,7 +4786,7 @@ build_plot <- function(prepared, fit_data, input) {
     }
   }
 
-  if (isTRUE(input$use_group_shapes)) {
+  if (isTRUE(use_group_shapes)) {
     p <- p +
       geom_point(
         data = plot_summary_df,
@@ -4715,14 +4856,14 @@ build_plot <- function(prepared, fit_data, input) {
       plain_text = input$plain_plot_text
     )
 
-  if (isTRUE(input$use_group_shapes)) {
+  if (isTRUE(use_group_shapes)) {
     p <- p + scale_shape_manual(values = shape_values, breaks = groups, labels = legend_labels, name = legend_name)
   }
 
   if (identical(input$legend_content, "Points only")) {
     p <- p + guides(color = guide_legend(order = 1), shape = guide_legend(order = 1))
   } else if (identical(input$legend_content, "Lines only")) {
-    if (isTRUE(input$use_group_shapes)) {
+    if (isTRUE(use_group_shapes)) {
       p <- p + guides(shape = "none", color = guide_legend(order = 1))
     } else {
       p <- p + guides(color = guide_legend(order = 1))
@@ -6201,6 +6342,20 @@ ui <- fluidPage(
           ),
           helpText("Optional. Add one label-color pair per line using = or :. Matching ignores upper/lower case, and the same mapping is reused in the curve plot and the Other Plots module."),
           uiOutput("series_color_map_status_ui"),
+          textAreaInput(
+            "series_shape_map",
+            "Fixed point shapes for specific series / compounds",
+            rows = 4,
+            width = "100%",
+            placeholder = paste(
+              "Compound A = Filled circle",
+              "Compound B = Filled square",
+              "Control = 17",
+              sep = "\n"
+            )
+          ),
+          helpText("Optional. Add one label-shape pair per line using = or :. This applies to curve-plot point shapes, and matching ignores upper/lower case."),
+          uiOutput("series_shape_map_status_ui"),
           selectInput(
             "legend_position",
             "Legend position",
@@ -6967,6 +7122,85 @@ server <- function(input, output, session) {
           tags$strong("Repeated labels"),
           tags$div(class = "validation-note", paste(parsed_map$duplicate_labels, collapse = ", ")),
           tags$div(class = "validation-note", "The last color entered for each repeated label is the one the app uses.")
+        )
+      },
+      if (length(parsed_map$invalid_lines)) {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("problem")),
+          tags$strong("Lines the app could not read"),
+          tags$ul(
+            class = "analysis-summary-list",
+            lapply(parsed_map$invalid_lines, tags$li)
+          )
+        )
+      }
+    )
+  })
+
+  output$series_shape_map_status_ui <- renderUI({
+    parsed_map <- parse_series_shape_map(input$series_shape_map %||% "")
+    if (!length(parsed_map$mapping) && !length(parsed_map$invalid_lines)) {
+      return(NULL)
+    }
+
+    df <- tryCatch(current_data(), error = function(e) NULL)
+    curve_levels <- character()
+
+    if (!is.null(df) && nrow(df) > 0) {
+      mapping <- tryCatch(resolved_mapping_inputs(), error = function(e) NULL)
+      if (!is.null(mapping) && !identical(mapping$group_col, "None") && mapping$group_col %in% names(df)) {
+        curve_levels <- unique(trimws(as.character(df[[mapping$group_col]])))
+        curve_levels <- curve_levels[nzchar(curve_levels)]
+      }
+    }
+
+    curve_shape_info <- resolve_series_shapes(
+      levels = curve_levels,
+      shape_text = input$series_shape_map
+    )
+    parsed_labels <- unname(parsed_map$labels)
+
+    tagList(
+      if (length(parsed_labels)) {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("ok")),
+          tags$strong("Fixed shape entries"),
+          tags$ul(
+            class = "analysis-summary-list",
+            lapply(parsed_labels, function(label) {
+              shape_value <- as.integer(unname(parsed_map$mapping[normalize_series_mapping_label(label)])[1])
+              tags$li(sprintf("%s -> %s (%s)", label, point_shape_label(shape_value), shape_value))
+            })
+          )
+        )
+      },
+      if (length(curve_shape_info$matched_labels)) {
+        tags$div(
+          class = "analysis-summary-tip",
+          tags$strong("Matched current curve groups"),
+          tags$div(class = "validation-note", paste(curve_shape_info$matched_labels, collapse = ", "))
+        )
+      },
+      if (length(curve_shape_info$unmatched_labels)) {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("warn")),
+          tags$strong("Not matched to the current curve groups"),
+          tags$div(class = "validation-note", paste(curve_shape_info$unmatched_labels, collapse = ", "))
+        )
+      },
+      if (length(parsed_map$mapping) && !isTRUE(input$use_group_shapes)) {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("warn")),
+          tags$strong("Fixed shape mapping is active"),
+          tags$div(class = "validation-note", "The fixed shape map overrides the single point symbol even if 'Use different point shapes by group' is unchecked.")
+        )
+      },
+      if (length(parsed_map$duplicate_labels)) {
+        tags$div(
+          class = paste("analysis-summary-tip", import_status_box_class("warn")),
+          tags$strong("Repeated labels"),
+          tags$div(class = "validation-note", paste(parsed_map$duplicate_labels, collapse = ", ")),
+          tags$div(class = "validation-note", "The last shape entered for each repeated label is the one the app uses.")
         )
       },
       if (length(parsed_map$invalid_lines)) {
